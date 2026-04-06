@@ -31,7 +31,10 @@ SAM2_MIN_AREA = 500           # minimum mask region area in pixels
 SAM2_FRAME_DIFF_THRESH = 15.0 # mean pixel diff to trigger re-segmentation
 
 # === Depth Estimation ===
-DEPTH_MODEL_NAME = "Intel/dpt-hybrid-midas"
+DEPTH_BACKEND = "pytorch"  # "pytorch" (high quality) or "tflite" (fast, mobile-ready)
+DEPTH_MODEL_NAME = "Intel/dpt-hybrid-midas"  # pytorch backend
+DEPTH_TFLITE_PATH = "models/midas_v21_small.tflite"  # tflite backend
+DEPTH_TFLITE_URL = "https://github.com/isl-org/MiDaS/releases/download/v2_1/model_opt.tflite"
 NORMAL_STRENGTH = 1.0  # normal map intensity (higher = more dramatic)
 
 # === Export ===
