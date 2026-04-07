@@ -46,11 +46,11 @@ FPS = 60
 
 # === Bounce ===
 GRAVITY = 1200.0
-BOUNCE_DAMPING = 0.7
-SQUASH_AMOUNT = 0.3
-SQUASH_DECAY = 8.0
-SWAY_AMPLITUDE = 20.0
-SWAY_SPEED = 1.5
+BOUNCE_DAMPING = 0.65
+SQUASH_AMOUNT = 0.15
+SQUASH_DECAY = 10.0
+SWAY_AMPLITUDE = 10.0
+SWAY_SPEED = 1.0
 
 
 # ──────────────────────────────────────
@@ -255,8 +255,31 @@ def run_pipeline(image_bgr, norm_x, norm_y):
 # Phase 3: 2.5D Pygame Viewer
 # ──────────────────────────────────────
 
+def _build_side_strip(obj_surf, thickness=10):
+    """Build a side face strip from the object's silhouette.
+
+    Creates a darkened, slightly shifted version of the outline
+    that looks like the 'edge' of a thick sticker/token.
+    """
+    import pygame
+
+    w, h = obj_surf.get_size()
+    raw = pygame.image.tobytes(obj_surf, "RGBA")
+    pixels = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 4)).copy()
+
+    # Darken to ~25% brightness for side color
+    side_px = pixels.copy()
+    side_px[:, :, 0] = (pixels[:, :, 0] * 0.25).astype(np.uint8)
+    side_px[:, :, 1] = (pixels[:, :, 1] * 0.2).astype(np.uint8)
+    side_px[:, :, 2] = (pixels[:, :, 2] * 0.15).astype(np.uint8)
+    # Alpha unchanged — transparent stays transparent
+
+    side_surf = pygame.image.frombytes(side_px.tobytes(), (w, h), "RGBA")
+    return side_surf
+
+
 def viewer_phase(object_path, depth_path, normal_path):
-    """Show the extracted object bouncing with 2.5D effect. Returns 'retake' or 'quit'."""
+    """Layered pseudo-3D viewer: top face + side face + shadow + auto tilt."""
     import pygame
 
     pygame.init()
@@ -265,25 +288,38 @@ def viewer_phase(object_path, depth_path, normal_path):
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 24)
 
+    # Load assets
     obj_surf = pygame.image.load(object_path).convert_alpha()
     depth_img = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
 
-    max_h = int(WINDOW_H * 0.45)
+    # Fit to view
+    max_h = int(WINDOW_H * 0.4)
     ow, oh = obj_surf.get_size()
     if oh > max_h:
         ratio = max_h / oh
         obj_surf = pygame.transform.smoothscale(obj_surf, (int(ow * ratio), max_h))
 
     sprite_w, sprite_h = obj_surf.get_size()
-    ground_y = WINDOW_H - 60
-    avg_depth = depth_img[depth_img > 0].mean() / 255.0 if (depth_img > 0).any() else 0.5
+    ground_y = WINDOW_H - 70
 
+    # Pre-build side face
+    side_surf = _build_side_strip(obj_surf)
+    THICKNESS = 5  # side face pixel thickness (subtle)
+
+    # Physics
     cx = WINDOW_W / 2.0
     cy = 60.0
     vy = 0.0
     squash = 0.0
     sway_phase = 0.0
+    tilt = 0.0       # current tilt angle in degrees
+    tilt_vel = 0.0    # tilt angular velocity
     bg_color = (240, 245, 250)
+
+    # Tilt config — subtle, natural
+    TILT_BOUNCE = 3.0     # tilt kick on bounce (degrees)
+    TILT_DAMPING = 0.95
+    TILT_SPRING = -5.0    # return-to-zero spring
 
     while True:
         dt = clock.tick(FPS) / 1000.0
@@ -304,50 +340,83 @@ def viewer_phase(object_path, depth_path, normal_path):
                     cy = 60.0
                     vy = 0.0
                     squash = 0.0
+                    tilt = 0.0
+                    tilt_vel = 0.0
 
+        # --- Physics ---
         vy += GRAVITY * dt
         cy += vy * dt
+
         sway_phase += SWAY_SPEED * dt * 2 * math.pi
         sway_offset = math.sin(sway_phase) * SWAY_AMPLITUDE
 
+        # Bounce
         bottom = cy + sprite_h / 2
         if bottom >= ground_y:
             cy = ground_y - sprite_h / 2
             vy = -abs(vy) * BOUNCE_DAMPING
             squash = SQUASH_AMOUNT
+            # Tilt kick on bounce (alternating direction)
+            tilt_vel += TILT_BOUNCE * (1.0 if math.sin(sway_phase) > 0 else -1.0)
             if abs(vy) < 30:
                 vy = 0
 
+        # Squash decay
         if squash > 0.001:
             squash *= math.exp(-SQUASH_DECAY * dt)
         else:
             squash = 0.0
 
-        screen.fill(bg_color)
-        pygame.draw.line(screen, (200, 200, 200), (0, ground_y), (WINDOW_W, ground_y), 1)
+        # Tilt spring + damping (auto-oscillate, return to 0)
+        tilt_vel += TILT_SPRING * tilt * dt
+        tilt_vel *= TILT_DAMPING
+        tilt += tilt_vel * dt * 60
+        tilt = max(-8, min(8, tilt))  # clamp — subtle range
 
-        # Shadow
-        height_above = max(0, ground_y - (cy + sprite_h / 2))
-        spread = max(0.3, 1.0 - height_above / 400.0)
-        shadow_w = int(sprite_w * spread * (0.6 + avg_depth * 0.4))
-        shadow_h = max(4, int(14 * spread))
-        shadow_surf = pygame.Surface((shadow_w, shadow_h), pygame.SRCALPHA)
-        pygame.draw.ellipse(shadow_surf, (0, 0, 0, int(60 * spread)),
-                            (0, 0, shadow_w, shadow_h))
-        screen.blit(shadow_surf,
-                    (int(cx + sway_offset - shadow_w / 2), int(ground_y - shadow_h / 2)))
-
-        # Sprite
+        # --- Squash-stretch ---
         sx_f = 1.0 + squash
         sy_f = 1.0 - squash
         draw_w = max(1, int(sprite_w * sx_f))
         draw_h = max(1, int(sprite_h * sy_f))
-        scaled = pygame.transform.smoothscale(obj_surf, (draw_w, draw_h))
+
+        # Side thickness varies with tilt
+        side_visible = abs(tilt) / 20.0  # 0~1
+        side_pixels = int(THICKNESS * side_visible + 2)
+
+        # --- Draw ---
+        screen.fill(bg_color)
+        pygame.draw.line(screen, (210, 210, 210), (0, ground_y), (WINDOW_W, ground_y), 1)
+
+        # Position (bottom-aligned)
         rx = int(cx + sway_offset - draw_w / 2)
         ry = int(cy + sprite_h / 2 - draw_h)
-        screen.blit(scaled, (rx, ry))
 
-        hud = font.render("SPACE=drop  R=retake camera  Q=quit", True, (150, 150, 150))
+        # 1. Shadow
+        height_above = max(0, ground_y - (cy + sprite_h / 2))
+        spread = max(0.3, 1.0 - height_above / 400.0)
+        shadow_w = int(sprite_w * spread * 0.9)
+        shadow_h = max(6, int(16 * spread))
+        shadow_surf = pygame.Surface((shadow_w, shadow_h), pygame.SRCALPHA)
+        shadow_alpha = int(50 * spread)
+        pygame.draw.ellipse(shadow_surf, (0, 0, 0, shadow_alpha),
+                            (0, 0, shadow_w, shadow_h))
+        screen.blit(shadow_surf,
+                    (int(cx + sway_offset - shadow_w / 2), int(ground_y - shadow_h / 2)))
+
+        # 2. Side face (multiple offset layers for thickness)
+        scaled_side = pygame.transform.smoothscale(side_surf, (draw_w, draw_h))
+        for i in range(side_pixels, 0, -1):
+            # Offset direction based on tilt
+            offset_x = int(tilt * 0.15 * i)
+            offset_y = i  # always slightly below
+            screen.blit(scaled_side, (rx + offset_x, ry + offset_y))
+
+        # 3. Top face (main sprite)
+        scaled_top = pygame.transform.smoothscale(obj_surf, (draw_w, draw_h))
+        screen.blit(scaled_top, (rx, ry))
+
+        # HUD
+        hud = font.render("SPACE=drop  R=retake  Q=quit", True, (150, 150, 150))
         screen.blit(hud, (10, 10))
         pygame.display.flip()
 

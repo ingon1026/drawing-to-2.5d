@@ -3,6 +3,7 @@ package com.drawing25d
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
 import android.view.MotionEvent
@@ -39,8 +40,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var depthHelper: DepthHelper
     private lateinit var cameraExecutor: ExecutorService
 
+    @Volatile
     private var currentContours: List<ContourAnalyzer.ContourInfo> = emptyList()
+    @Volatile
     private var isProcessing = false
+    @Volatile
+    private var isAnalyzing = false
     private var imageWidth = 0
     private var imageHeight = 0
 
@@ -54,6 +59,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "OpenCV 초기화 실패", Toast.LENGTH_LONG).show()
             return
         }
+        Log.d(TAG, "OpenCV initialized")
 
         // Bind views
         previewView = findViewById(R.id.previewView)
@@ -99,13 +105,12 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
 
-            // Preview
             val preview = Preview.Builder()
                 .build()
                 .also { it.surfaceProvider = previewView.surfaceProvider }
 
-            // Image analysis for contour detection
             val analyzer = ImageAnalysis.Builder()
+                .setTargetResolution(android.util.Size(640, 480))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
                 .also {
@@ -127,42 +132,58 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun analyzeFrame(imageProxy: ImageProxy) {
-        if (isProcessing) {
+        // Skip if processing a selection or already analyzing
+        if (isProcessing || isAnalyzing) {
             imageProxy.close()
             return
         }
 
-        val bitmap = imageProxy.toBitmap()
-        imageWidth = bitmap.width
-        imageHeight = bitmap.height
+        isAnalyzing = true
 
-        val viewW = contourOverlay.width
-        val viewH = contourOverlay.height
+        try {
+            val bitmap = imageProxy.toBitmap()
 
-        if (viewW <= 0 || viewH <= 0) {
-            imageProxy.close()
-            return
-        }
-
-        val contours = ContourAnalyzer.findContours(bitmap, viewW, viewH)
-        currentContours = contours
-
-        val paths = contours.map { it.path }
-
-        runOnUiThread {
-            contourOverlay.updateContours(paths)
-            if (contours.isNotEmpty()) {
-                statusText.text = "${contours.size}개 그림 감지 — 터치하세요"
+            // Handle rotation
+            val rotation = imageProxy.imageInfo.rotationDegrees
+            val rotatedBitmap = if (rotation != 0) {
+                val matrix = Matrix()
+                matrix.postRotate(rotation.toFloat())
+                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
             } else {
-                statusText.text = "그림을 비춰주세요"
+                bitmap
             }
-        }
 
-        imageProxy.close()
+            imageWidth = rotatedBitmap.width
+            imageHeight = rotatedBitmap.height
+
+            val viewW = contourOverlay.width
+            val viewH = contourOverlay.height
+
+            if (viewW > 0 && viewH > 0) {
+                val contours = ContourAnalyzer.findContours(rotatedBitmap, viewW, viewH)
+                currentContours = contours
+                val paths = contours.map { it.path }
+
+                runOnUiThread {
+                    if (!isProcessing && !bounceView.isActive()) {
+                        contourOverlay.updateContours(paths)
+                        statusText.text = if (contours.isNotEmpty()) {
+                            "${contours.size}개 그림 감지 — 터치하세요"
+                        } else {
+                            "그림을 비춰주세요"
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Analysis error", e)
+        } finally {
+            isAnalyzing = false
+            imageProxy.close()
+        }
     }
 
     private fun setupTouchHandler() {
-        // Touch on the whole screen
         val rootLayout = findViewById<View>(R.id.rootLayout)
         rootLayout.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_DOWN && !isProcessing) {
@@ -173,8 +194,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleTouch(touchX: Float, touchY: Float) {
-        if (currentContours.isEmpty()) return
-
         // If bounce is active, stop it and go back to camera mode
         if (bounceView.isActive()) {
             bounceView.stopBounce()
@@ -183,34 +202,33 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Convert touch coords to image coords
+        // Convert touch coords to normalized [0, 1]
         val viewW = contourOverlay.width.toFloat()
         val viewH = contourOverlay.height.toFloat()
-        val imgX = touchX / viewW * imageWidth
-        val imgY = touchY / viewH * imageHeight
+        if (viewW <= 0 || viewH <= 0) return
 
-        val idx = ContourAnalyzer.findContourAt(currentContours, imgX, imgY)
-        if (idx < 0) return
-
-        // Found a contour — process it
-        val contour = currentContours[idx]
-        val normX = contour.center.x / imageWidth
-        val normY = contour.center.y / imageHeight
+        val normX = touchX / viewW
+        val normY = touchY / viewH
+        Log.d(TAG, "Touch at norm($normX, $normY)")
 
         isProcessing = true
         statusText.text = "처리 중..."
         contourOverlay.clear()
 
-        // Capture current frame and process in background
-        val bitmap = previewView.bitmap ?: return
+        // Capture current camera frame
+        val bitmap = previewView.bitmap
+        if (bitmap == null) {
+            isProcessing = false
+            statusText.text = "프레임 캡처 실패"
+            return
+        }
 
         lifecycleScope.launch {
             val result = withContext(Dispatchers.Default) {
-                processDrawing(bitmap, normX, normY)
+                processWithMagicTouch(bitmap, normX, normY)
             }
 
             if (result != null) {
-                // Show bounce animation
                 contourOverlay.visibility = View.INVISIBLE
                 statusText.text = "터치하면 다시 카메라로"
                 bounceView.startBounce(result)
@@ -223,11 +241,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun processDrawing(bitmap: Bitmap, normX: Float, normY: Float): Bitmap? {
+    /**
+     * Run magic_touch segmentation at touch point.
+     * Rejects if foreground is too large (>30%) = probably grabbed the whole paper.
+     */
+    private fun processWithMagicTouch(bitmap: Bitmap, normX: Float, normY: Float): Bitmap? {
         return try {
-            Log.d(TAG, "Segmenting at ($normX, $normY)")
+            Log.d(TAG, "magic_touch at ($normX, $normY)")
 
-            // 1. Segmentation
             val mask = segHelper.segment(bitmap, normX, normY)
 
             // Check foreground ratio
@@ -237,23 +258,61 @@ class MainActivity : AppCompatActivity() {
             val fgRatio = fgCount.toFloat() / maskPixels.size
             Log.d(TAG, "Foreground: ${(fgRatio * 100).toInt()}%")
 
+            // Too small = missed
             if (fgRatio < 0.005f) {
-                Log.w(TAG, "Almost no foreground detected")
+                Log.w(TAG, "No foreground detected")
                 return null
             }
 
-            // 2. Apply mask → transparent cutout
-            val cutout = segHelper.applyMask(bitmap, mask)
+            // Too large = grabbed whole paper
+            if (fgRatio > 0.30f) {
+                Log.w(TAG, "Foreground too large ($fgRatio) — probably paper, rejecting")
+                return null
+            }
 
-            // 3. Depth estimation (for future use, saved but not displayed yet)
-            val depth = depthHelper.estimateDepth(bitmap, mask)
-            Log.d(TAG, "Depth estimation done")
+            // Apply mask → transparent cutout
+            val fullCutout = segHelper.applyMask(bitmap, mask)
 
-            cutout
+            // Crop to non-transparent bounding box
+            cropToContent(fullCutout)
         } catch (e: Exception) {
             Log.e(TAG, "Processing failed", e)
             null
         }
+    }
+
+    /**
+     * Crop bitmap to the bounding box of non-transparent pixels.
+     */
+    private fun cropToContent(bitmap: Bitmap): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        var minX = w; var minY = h; var maxX = 0; var maxY = 0
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val alpha = (pixels[y * w + x] ushr 24) and 0xFF
+                if (alpha > 0) {
+                    if (x < minX) minX = x
+                    if (y < minY) minY = y
+                    if (x > maxX) maxX = x
+                    if (y > maxY) maxY = y
+                }
+            }
+        }
+
+        if (maxX <= minX || maxY <= minY) return bitmap
+
+        // Add padding
+        val pad = 10
+        minX = (minX - pad).coerceAtLeast(0)
+        minY = (minY - pad).coerceAtLeast(0)
+        maxX = (maxX + pad).coerceAtMost(w - 1)
+        maxY = (maxY + pad).coerceAtMost(h - 1)
+
+        return Bitmap.createBitmap(bitmap, minX, minY, maxX - minX + 1, maxY - minY + 1)
     }
 
     override fun onDestroy() {

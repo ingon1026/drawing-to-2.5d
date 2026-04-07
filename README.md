@@ -5,7 +5,7 @@
 
 ---
 
-## 🎯 뭘 하는 건가?
+##  뭘 하는 건가?
 
 ```
 📷 카메라로 종이 비추기
@@ -19,7 +19,7 @@ Unity/AR에서 평면 그림에 빛과 그림자가 반응하는 **2.5D 효과**
 
 ---
 
-## 🧠 사용 모델
+##  사용 모델
 
 | 모델 | 역할 | 비고 |
 |------|------|------|
@@ -27,7 +27,7 @@ Unity/AR에서 평면 그림에 빛과 그림자가 반응하는 **2.5D 효과**
 | `Intel/dpt-hybrid-midas` | 깊이 추정 | MiDaS, 자동 다운로드 |
 | `SAM2.1-hiera-tiny` | 정밀 auto-mask | 선택, 기본은 contour 방식 |
 
-## 🛠️ 기술 스택
+##  기술 스택
 
 | 분류 | 기술 |
 |------|------|
@@ -39,7 +39,7 @@ Unity/AR에서 평면 그림에 빛과 그림자가 반응하는 **2.5D 효과**
 
 ---
 
-## 📦 설치
+##  설치
 
 ```bash
 pip install -r requirements.txt
@@ -57,7 +57,7 @@ wget -P models/ https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_
 
 ---
 
-## 🚀 실행
+##  실행
 
 ### 라이브 데모
 ```bash
@@ -79,7 +79,7 @@ python3 pipeline.py --input image.jpg --x 0.5 --y 0.4 --debug
 
 ---
 
-## 📤 출력물
+##  출력물
 
 | 파일 | 설명 |
 |------|------|
@@ -90,7 +90,7 @@ python3 pipeline.py --input image.jpg --x 0.5 --y 0.4 --debug
 
 ---
 
-## 📁 구조
+##  구조
 
 ```
 ├── config.py           # 설정값
@@ -108,6 +108,6 @@ python3 pipeline.py --input image.jpg --x 0.5 --y 0.4 --debug
 
 ---
 
-## 💻 환경
+##  환경
 
 Python 3.12 · Ubuntu 24.04 (WSL2) · CUDA 12.8 · Intel RealSense D455 (선택)

@@ -7,8 +7,8 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * Canvas-based 2.5D bounce animation view.
- * Displays a cutout bitmap bouncing on screen with squash-stretch effect.
+ * Layered pseudo-3D bounce view.
+ * Renders: shadow → side face → top face, with auto-tilt on bounce.
  */
 class BounceView @JvmOverloads constructor(
     context: Context,
@@ -16,16 +16,23 @@ class BounceView @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     companion object {
-        private const val GRAVITY = 1200f    // px/s^2
-        private const val BOUNCE_DAMPING = 0.7f
-        private const val SQUASH_AMOUNT = 0.25f
-        private const val SQUASH_DECAY = 8f
-        private const val SWAY_AMPLITUDE = 20f
-        private const val SWAY_SPEED = 1.5f
+        private const val GRAVITY = 1200f
+        private const val BOUNCE_DAMPING = 0.65f
+        private const val SQUASH_AMOUNT = 0.15f
+        private const val SQUASH_DECAY = 10f
+        private const val SWAY_AMPLITUDE = 10f
+        private const val SWAY_SPEED = 1.0f
+        private const val TILT_BOUNCE = 3f
+        private const val TILT_DAMPING = 0.95f
+        private const val TILT_SPRING = -5f
+        private const val TILT_MAX = 8f
+        private const val SIDE_THICKNESS = 5
         private const val FPS = 60
     }
 
-    private var spriteBitmap: Bitmap? = null
+    private var topBitmap: Bitmap? = null      // original cutout
+    private var sideBitmap: Bitmap? = null      // darkened version for side face
+    private var originalBitmap: Bitmap? = null
     private var spriteW = 0f
     private var spriteH = 0f
 
@@ -35,6 +42,8 @@ class BounceView @JvmOverloads constructor(
     private var vy = 0f
     private var squash = 0f
     private var swayPhase = 0f
+    private var tilt = 0f
+    private var tiltVel = 0f
     private var groundY = 0f
     private var isAnimating = false
     private var lastTime = 0L
@@ -45,40 +54,86 @@ class BounceView @JvmOverloads constructor(
     }
 
     private val shadowPaint = Paint().apply {
-        color = Color.argb(50, 0, 0, 0)
         isAntiAlias = true
     }
 
-    /**
-     * Start bounce animation with a cutout bitmap.
-     */
     fun startBounce(bitmap: Bitmap) {
-        // Scale to fit ~40% of view height
-        val maxH = height * 0.4f
-        val scale = if (bitmap.height > maxH) maxH / bitmap.height else 1f
-        spriteBitmap = if (scale < 1f) {
-            Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+        originalBitmap = bitmap
+        layoutSprite()
+        resetPhysics()
+        isAnimating = true
+        lastTime = System.nanoTime()
+        invalidate()
+    }
+
+    private fun layoutSprite() {
+        val bmp = originalBitmap ?: return
+        val vw = width.toFloat()
+        val vh = height.toFloat()
+        if (vw <= 0 || vh <= 0) return
+
+        val maxDim = min(vw, vh) * 0.35f
+        val bmpMax = max(bmp.width, bmp.height).toFloat()
+        val scale = if (bmpMax > maxDim) maxDim / bmpMax else 1f
+
+        topBitmap = if (scale < 1f) {
+            Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt(), (bmp.height * scale).toInt(), true)
         } else {
-            bitmap
+            bmp.copy(Bitmap.Config.ARGB_8888, false)
         }
 
-        spriteW = spriteBitmap!!.width.toFloat()
-        spriteH = spriteBitmap!!.height.toFloat()
+        // Build side face — darken to ~25%
+        sideBitmap = buildSideFace(topBitmap!!)
+
+        spriteW = topBitmap!!.width.toFloat()
+        spriteH = topBitmap!!.height.toFloat()
+        groundY = vh * 0.85f
+    }
+
+    private fun buildSideFace(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
+        val pixels = IntArray(w * h)
+        src.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val out = IntArray(w * h)
+        for (i in pixels.indices) {
+            val a = (pixels[i] ushr 24) and 0xFF
+            val r = ((pixels[i] shr 16) and 0xFF) * 25 / 100
+            val g = ((pixels[i] shr 8) and 0xFF) * 20 / 100
+            val b = (pixels[i] and 0xFF) * 15 / 100
+            out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+        }
+
+        val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        result.setPixels(out, 0, w, 0, 0, w, h)
+        return result
+    }
+
+    private fun resetPhysics() {
         cx = width / 2f
-        cy = height * 0.1f  // start near top
+        cy = height * 0.08f
         vy = 0f
         squash = 0f
         swayPhase = 0f
-        groundY = height * 0.85f
-        isAnimating = true
-        lastTime = System.nanoTime()
+        tilt = 0f
+        tiltVel = 0f
+    }
 
-        invalidate()
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (isAnimating && originalBitmap != null) {
+            layoutSprite()
+            resetPhysics()
+            lastTime = System.nanoTime()
+        }
     }
 
     fun stopBounce() {
         isAnimating = false
-        spriteBitmap = null
+        topBitmap = null
+        sideBitmap = null
+        originalBitmap = null
         invalidate()
     }
 
@@ -86,16 +141,15 @@ class BounceView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (!isAnimating || spriteBitmap == null) return
+        if (!isAnimating || topBitmap == null || sideBitmap == null) return
 
         val now = System.nanoTime()
         val dt = ((now - lastTime) / 1_000_000_000f).coerceAtMost(0.05f)
         lastTime = now
 
-        // Physics update
+        // Physics
         vy += GRAVITY * dt
         cy += vy * dt
-
         swayPhase += SWAY_SPEED * dt * 2 * Math.PI.toFloat()
         val swayOffset = sin(swayPhase) * SWAY_AMPLITUDE
 
@@ -105,43 +159,58 @@ class BounceView @JvmOverloads constructor(
             cy = groundY - spriteH / 2
             vy = -abs(vy) * BOUNCE_DAMPING
             squash = SQUASH_AMOUNT
+            tiltVel += TILT_BOUNCE * (if (sin(swayPhase) > 0) 1f else -1f)
             if (abs(vy) < 30) vy = 0f
         }
 
         // Squash decay
-        if (squash > 0.001f) {
-            squash *= exp(-SQUASH_DECAY * dt)
-        } else {
-            squash = 0f
-        }
+        if (squash > 0.001f) squash *= exp(-SQUASH_DECAY * dt) else squash = 0f
 
-        // Draw shadow
+        // Tilt spring
+        tiltVel += TILT_SPRING * tilt * dt
+        tiltVel *= TILT_DAMPING
+        tilt += tiltVel * dt * 60
+        tilt = tilt.coerceIn(-TILT_MAX, TILT_MAX)
+
+        // Dimensions
+        val sx = 1f + squash
+        val sy = 1f - squash
+        val drawW = (spriteW * sx).toInt().coerceAtLeast(1)
+        val drawH = (spriteH * sy).toInt().coerceAtLeast(1)
+
+        val rx = (cx + swayOffset - drawW / 2).toInt()
+        val ry = (cy + spriteH / 2 - drawH).toInt()
+
+        // 1. Shadow
         val heightAbove = (groundY - (cy + spriteH / 2)).coerceAtLeast(0f)
         val spread = (1f - heightAbove / 400f).coerceAtLeast(0.3f)
-        val shadowW = spriteW * spread * 0.8f
-        val shadowH = 12f * spread
+        val shadowW = (spriteW * spread * 0.9f).toInt()
+        val shadowH = (16f * spread).toInt().coerceAtLeast(6)
+        val shadowAlpha = (50 * spread).toInt()
+        shadowPaint.color = Color.argb(shadowAlpha, 0, 0, 0)
         canvas.drawOval(
-            cx + swayOffset - shadowW / 2,
-            groundY - shadowH / 2,
-            cx + swayOffset + shadowW / 2,
-            groundY + shadowH / 2,
+            cx + swayOffset - shadowW / 2f,
+            groundY - shadowH / 2f,
+            cx + swayOffset + shadowW / 2f,
+            groundY + shadowH / 2f,
             shadowPaint
         )
 
-        // Draw sprite with squash-stretch
-        val sx = 1f + squash
-        val sy = 1f - squash
-        val drawW = spriteW * sx
-        val drawH = spriteH * sy
+        // 2. Side face layers
+        val scaledSide = Bitmap.createScaledBitmap(sideBitmap!!, drawW, drawH, true)
+        val sideVisible = abs(tilt) / TILT_MAX
+        val sidePixels = (SIDE_THICKNESS * sideVisible + 1).toInt()
+        val srcRect = Rect(0, 0, drawW, drawH)
+        for (i in sidePixels downTo 1) {
+            val offsetX = (tilt * 0.15f * i).toInt()
+            val dstRect = Rect(rx + offsetX, ry + i, rx + offsetX + drawW, ry + i + drawH)
+            canvas.drawBitmap(scaledSide, srcRect, dstRect, paint)
+        }
 
-        val dstLeft = cx + swayOffset - drawW / 2
-        val dstTop = cy + spriteH / 2 - drawH  // bottom-aligned
-        val dstRect = RectF(dstLeft, dstTop, dstLeft + drawW, dstTop + drawH)
-        val srcRect = Rect(0, 0, spriteBitmap!!.width, spriteBitmap!!.height)
+        // 3. Top face
+        val scaledTop = Bitmap.createScaledBitmap(topBitmap!!, drawW, drawH, true)
+        canvas.drawBitmap(scaledTop, rx.toFloat(), ry.toFloat(), paint)
 
-        canvas.drawBitmap(spriteBitmap!!, srcRect, dstRect, paint)
-
-        // Keep animating
         postInvalidateDelayed((1000 / FPS).toLong())
     }
 }
