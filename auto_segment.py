@@ -40,9 +40,10 @@ def generate_masks_contour(image_bgr, min_area=800):
     """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
 
-    # Adaptive threshold: handles uneven lighting on paper
+    # Qiita-style: erosion to thicken thin/faint lines, then adaptive threshold
+    eroded = cv2.erode(gray, np.ones((3, 3), np.uint8), iterations=1)
     binary = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        eroded, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV, 31, 10
     )
 
@@ -129,6 +130,11 @@ def generate_masks_sam2(image_rgb):
 # ──────────────────────────────────────
 # Common utilities
 # ──────────────────────────────────────
+
+def contour_mask_to_uint8(mask_dict):
+    """Convert contour segment mask (bool) to uint8 binary mask (0/255)."""
+    return (mask_dict["segmentation"].astype(np.uint8) * 255)
+
 
 def masks_to_overlay(image_bgr, masks, alpha=0.4, highlight_idx=None):
     """Create a colored overlay showing all segments."""

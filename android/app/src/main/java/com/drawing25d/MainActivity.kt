@@ -211,6 +211,24 @@ class MainActivity : AppCompatActivity() {
         val normY = touchY / viewH
         Log.d(TAG, "Touch at norm($normX, $normY)")
 
+        // Find which contour was touched
+        val contours = currentContours
+        if (contours.isEmpty()) {
+            statusText.text = "감지된 그림이 없습니다"
+            return
+        }
+
+        val hitIdx = ContourAnalyzer.findContourAt(
+            contours, touchX, touchY,
+            viewW.toInt(), viewH.toInt(),
+            imageWidth, imageHeight
+        )
+
+        if (hitIdx < 0) {
+            statusText.text = "그림 영역을 터치하세요"
+            return
+        }
+
         isProcessing = true
         statusText.text = "처리 중..."
         contourOverlay.clear()
@@ -223,9 +241,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        val selectedContour = contours[hitIdx]
+
         lifecycleScope.launch {
             val result = withContext(Dispatchers.Default) {
-                processWithMagicTouch(bitmap, normX, normY)
+                processWithContour(bitmap, selectedContour)
             }
 
             if (result != null) {
@@ -242,31 +262,41 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Run magic_touch segmentation at touch point.
-     * Rejects if foreground is too large (>30%) = probably grabbed the whole paper.
+     * Extract drawing using contour mask directly.
+     * No ML model needed — contour from preview is the segmentation.
      */
-    private fun processWithMagicTouch(bitmap: Bitmap, normX: Float, normY: Float): Bitmap? {
+    private fun processWithContour(bitmap: Bitmap, contour: ContourAnalyzer.ContourInfo): Bitmap? {
         return try {
-            Log.d(TAG, "magic_touch at ($normX, $normY)")
+            Log.d(TAG, "Contour mask extraction (area=${contour.area.toInt()})")
+            Log.d(TAG, "  bitmap: ${bitmap.width}x${bitmap.height}, analyzer image: ${imageWidth}x${imageHeight}")
 
-            val mask = segHelper.segment(bitmap, normX, normY)
+            // Scale contour points from analyzer image coords to bitmap coords
+            val scaleX = bitmap.width.toDouble() / imageWidth.coerceAtLeast(1)
+            val scaleY = bitmap.height.toDouble() / imageHeight.coerceAtLeast(1)
+            Log.d(TAG, "  scale: ${scaleX}x${scaleY}")
 
-            // Check foreground ratio
+            val scaledContour = if (scaleX != 1.0 || scaleY != 1.0) {
+                val points = contour.contourMat.toArray()
+                val scaled = points.map { pt ->
+                    org.opencv.core.Point(pt.x * scaleX, pt.y * scaleY)
+                }
+                val scaledMat = org.opencv.core.MatOfPoint(*scaled.toTypedArray())
+                ContourAnalyzer.ContourInfo(contour.path, contour.area, contour.center, scaledMat)
+            } else {
+                contour
+            }
+
+            val mask = ContourAnalyzer.contourToMask(scaledContour, bitmap.width, bitmap.height)
+
+            // Check mask is not empty
             val maskPixels = IntArray(mask.width * mask.height)
             mask.getPixels(maskPixels, 0, mask.width, 0, 0, mask.width, mask.height)
             val fgCount = maskPixels.count { (it and 0xFF) > 128 }
             val fgRatio = fgCount.toFloat() / maskPixels.size
-            Log.d(TAG, "Foreground: ${(fgRatio * 100).toInt()}%")
+            Log.d(TAG, "  Contour mask foreground: ${(fgRatio * 100).toInt()}%")
 
-            // Too small = missed
-            if (fgRatio < 0.005f) {
-                Log.w(TAG, "No foreground detected")
-                return null
-            }
-
-            // Too large = grabbed whole paper
-            if (fgRatio > 0.30f) {
-                Log.w(TAG, "Foreground too large ($fgRatio) — probably paper, rejecting")
+            if (fgRatio < 0.001f) {
+                Log.w(TAG, "  Empty contour mask — skipping")
                 return null
             }
 

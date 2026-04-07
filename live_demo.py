@@ -33,7 +33,6 @@ warnings.filterwarnings("ignore")
 
 import config
 import normalize
-import segment
 import postprocess
 import depth
 import export
@@ -188,7 +187,8 @@ def camera_phase():
 
                 close_camera(cam)
                 cv2.destroyAllWindows()
-                return frame.copy(), scx / w, scy / h
+                contour_mask = auto_segment.contour_mask_to_uint8(masks[seg_idx])
+                return frame.copy(), scx / w, scy / h, contour_mask
             else:
                 click_point = None
 
@@ -208,33 +208,30 @@ def camera_phase():
 # Phase 2: Pipeline processing
 # ──────────────────────────────────────
 
-def run_pipeline(image_bgr, norm_x, norm_y):
-    """Run segmentation + depth + normal + export. Returns output paths dict or None."""
+def run_pipeline(image_bgr, contour_mask):
+    """Run contour-based segmentation + depth + normal + export."""
     t0 = time.time()
 
-    print(f"\n[1/5] Normalizing ...")
+    print(f"\n[1/4] Normalizing ...")
     image = normalize.white_balance(image_bgr)
 
-    print(f"[2/5] Segmenting at ({norm_x:.2f}, {norm_y:.2f}) ...")
-    segment.download_model_if_needed()
-    segmenter = segment.load_segmenter()
-    raw_mask = segment.segment_at_point(segmenter, image, norm_x, norm_y)
+    print(f"[2/4] Applying contour mask ...")
+    h, w = image.shape[:2]
+    raw_mask = cv2.resize(contour_mask, (w, h), interpolation=cv2.INTER_NEAREST)
     fg = raw_mask.sum() / (raw_mask.size * 255) * 100
     print(f"  Foreground: {fg:.1f}%")
 
-    if fg < 0.5:
-        print("  WARNING: Almost no foreground detected.")
+    if fg < 0.1:
+        print("  WARNING: Empty mask.")
         return None
 
-    print(f"[3/5] Postprocessing mask ...")
+    print(f"[3/4] Postprocessing mask ...")
     mask = postprocess.clean_mask(raw_mask)
 
-    print(f"[4/5] Estimating depth & normal ...")
+    print(f"[4/4] Estimating depth & normal + exporting ...")
     depth_map = depth.estimate_depth(image, mask)
     normal_map = depth.depth_to_normal(depth_map, strength=config.NORMAL_STRENGTH)
     normal_map[mask == 0] = (128, 128, 255)
-
-    print(f"[5/5] Exporting ...")
     out = config.OUTPUT_DIR
     paths = {
         "mask": export.export_mask(mask, out),
@@ -434,11 +431,8 @@ def main():
     print("  Camera → Realtime Preview → Click → 2.5D Viewer")
     print("=" * 50)
 
-    # Pre-load pipeline models (not SAM2 — contour needs no model)
+    # Pre-load depth model (contour needs no model)
     print("\nPre-loading models ...")
-    segment.download_model_if_needed()
-    segment.load_segmenter()
-    print("  Segmenter ready")
     depth.load_depth_model()
     print("  Depth model ready")
     print()
@@ -447,9 +441,9 @@ def main():
         result = camera_phase()
         if result is None:
             break
-        image_bgr, norm_x, norm_y = result
+        image_bgr, _, _, contour_mask = result
 
-        paths = run_pipeline(image_bgr, norm_x, norm_y)
+        paths = run_pipeline(image_bgr, contour_mask)
         if paths is None:
             print("Segmentation failed. Try again.")
             continue

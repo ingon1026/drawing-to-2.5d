@@ -37,6 +37,9 @@ DEPTH_TFLITE_PATH = "models/midas_v21_small.tflite"  # tflite backend
 DEPTH_TFLITE_URL = "https://github.com/isl-org/MiDaS/releases/download/v2_1/model_opt.tflite"
 NORMAL_STRENGTH = 1.0  # normal map intensity (higher = more dramatic)
 
+# === Fallback ===
+ML_FOREGROUND_MIN = 5.0  # ML foreground % below this → use contour mask fallback
+
 # === Export ===
 OUTPUT_DIR = "output"
 MASK_FILENAME = "mask.png"
