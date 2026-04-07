@@ -9,8 +9,8 @@ import org.opencv.imgproc.Imgproc
 import org.opencv.core.MatOfPoint2f
 
 /**
- * Lightweight contour detection for visual preview only.
- * Actual segmentation is done by magic_touch TFLite.
+ * Contour-based segmentation for preview and extraction.
+ * Detects drawing contours, provides hit-testing, and generates binary masks.
  */
 object ContourAnalyzer {
 
