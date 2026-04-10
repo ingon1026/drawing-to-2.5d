@@ -1,0 +1,4 @@
+tensorflow>=2.13
+numpy
+Pillow
+scikit-learn

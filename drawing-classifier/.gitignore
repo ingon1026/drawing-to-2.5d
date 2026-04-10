@@ -1,0 +1,36 @@
+# Data (regenerated via download_data.py)
+data/
+
+# Training outputs
+outputs/
+runs/
+
+# Model weights (too large for git)
+*.pt
+*.onnx
+*.tflite
+models/
+!models/labels.txt
+
+# Calibration data
+*.npy
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
