@@ -1,0 +1,11 @@
+{
+  "name": "sketch-guide",
+  "version": "1.0.0",
+  "description": "AI-powered real-time drawing guide using Sketch RNN",
+  "scripts": {
+    "download-models": "node scripts/download-models.js",
+    "build": "node scripts/build-standalone.js",
+    "start": "bash run.sh"
+  },
+  "license": "MIT"
+}
