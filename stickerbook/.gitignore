@@ -1,0 +1,23 @@
+# Model weights (re-downloaded via ultralytics / symlinked from LivingDrawing)
+models/*.pt
+
+# Runtime-generated assets
+assets/captures/
+assets/debug/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Test cache
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
