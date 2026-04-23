@@ -4,7 +4,8 @@ const path = require('path');
 
 const modelsDir = path.join(__dirname, '../assets/models');
 const libDir = path.join(__dirname, '../assets/web/lib');
-const categories = ['pig', 'cat', 'dog', 'bird', 'flower'];
+// SketchRNN 모델 카테고리 (large 우선, 없으면 small fallback)
+const categories = ['pig'];
 
 console.log('Loading libraries...');
 const numjsCode = fs.readFileSync(path.join(libDir, 'numjs.js'), 'utf8');
@@ -30,7 +31,9 @@ const html = `<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Sketch Guide v2</title>
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="AI와 함께 그리는 드로잉 가이드 — K3I 사내 도구">
+  <title>Sketch Guide — K3I</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {

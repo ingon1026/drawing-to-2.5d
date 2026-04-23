@@ -1,0 +1,405 @@
+#!/usr/bin/env node
+/**
+ * Build script: bundles numjs.js + sketch_rnn.js + sketch engine
+ * into a single self-contained HTML string module.
+ *
+ * Usage: node scripts/build-html.js
+ * Output: src/utils/generatedHTML.js
+ */
+
+const fs = require('fs');
+const path = require('path');
+
+const numjsCode = fs.readFileSync(
+  path.join(__dirname, '../assets/web/lib/numjs.js'), 'utf8'
+);
+const sketchRNNCode = fs.readFileSync(
+  path.join(__dirname, '../assets/web/lib/sketch_rnn.js'), 'utf8'
+);
+
+const sketchEngineCode = `
+(function () {
+  "use strict";
+
+  var CONFIG = {
+    guideColor: "rgba(74, 144, 217, 0.35)",
+    guideLineWidth: 3.0,
+    userColor: "#333333",
+    userLineWidth: 2.5,
+    temperature: 0.25,
+    maxGuideSteps: 80,
+    screenScaleFactor: 3.0,
+    epsilon: 2.0,
+    minSequenceLength: 5
+  };
+
+  var canvas, ctx;
+  var canvasWidth, canvasHeight;
+  var model = null;
+  var modelStateOrig = null;
+  var currentCategory = "";
+  var modelLoaded = false;
+
+  var isDrawing = false;
+  var hasStarted = false;
+  var rawLines = [];
+  var currentRawLine = [];
+  var strokes = [];
+  var startX, startY;
+  var lastX, lastY;
+  var guideStrokes = [];
+  var guideVisible = false;
+
+  function initCanvas() {
+    canvas = document.getElementById("drawing-canvas");
+    ctx = canvas.getContext("2d");
+    resizeCanvas();
+    window.addEventListener("resize", resizeCanvas);
+  }
+
+  function resizeCanvas() {
+    canvasWidth = window.innerWidth;
+    canvasHeight = window.innerHeight - 44 - 50;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    canvas.style.width = canvasWidth + "px";
+    canvas.style.height = canvasHeight + "px";
+    redrawAll();
+  }
+
+  function drawLine(x1, y1, x2, y2, color, width) {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  }
+
+  function drawStrokesOnCanvas(strokeArray, sx, sy, color, lineWidth) {
+    var x = sx, y = sy;
+    var prevPen = [1, 0, 0];
+    for (var i = 0; i < strokeArray.length; i++) {
+      var dx = strokeArray[i][0];
+      var dy = strokeArray[i][1];
+      var penDown = strokeArray[i][2];
+      var penUp = strokeArray[i][3];
+      var penEnd = strokeArray[i][4];
+      if (prevPen[2] === 1) break;
+      if (prevPen[0] === 1) {
+        drawLine(x, y, x + dx, y + dy, color, lineWidth);
+      }
+      x += dx;
+      y += dy;
+      prevPen = [penDown, penUp, penEnd];
+    }
+  }
+
+  function redrawAll() {
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    if (strokes.length > 0) {
+      drawStrokesOnCanvas(strokes, startX, startY, CONFIG.userColor, CONFIG.userLineWidth);
+    }
+    if (guideVisible && guideStrokes.length > 0) {
+      var gx, gy;
+      if (rawLines.length > 0) {
+        var ll = rawLines[rawLines.length - 1];
+        gx = ll[ll.length - 1][0];
+        gy = ll[ll.length - 1][1];
+      } else {
+        gx = startX;
+        gy = startY;
+      }
+      drawStrokesOnCanvas(guideStrokes, gx, gy, CONFIG.guideColor, CONFIG.guideLineWidth);
+    }
+  }
+
+  function getPointerPos(e) {
+    var rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  function onPointerDown(e) {
+    e.preventDefault();
+    isDrawing = true;
+    var pos = getPointerPos(e);
+    if (!hasStarted) {
+      hasStarted = true;
+      startX = pos.x;
+      startY = pos.y;
+    }
+    lastX = pos.x;
+    lastY = pos.y;
+    currentRawLine = [[pos.x, pos.y]];
+    guideVisible = false;
+    redrawAll();
+  }
+
+  function onPointerMove(e) {
+    e.preventDefault();
+    if (!isDrawing) return;
+    var pos = getPointerPos(e);
+    var dx = pos.x - lastX;
+    var dy = pos.y - lastY;
+    if (dx * dx + dy * dy > CONFIG.epsilon * CONFIG.epsilon) {
+      drawLine(lastX, lastY, pos.x, pos.y, CONFIG.userColor, CONFIG.userLineWidth);
+      lastX = pos.x;
+      lastY = pos.y;
+      currentRawLine.push([pos.x, pos.y]);
+    }
+  }
+
+  function onPointerUp(e) {
+    e.preventDefault();
+    if (!isDrawing) return;
+    isDrawing = false;
+    if (currentRawLine.length < 2) { currentRawLine = []; return; }
+
+    var simplifiedLine = DataTool.simplify_line(currentRawLine);
+    if (simplifiedLine.length > 1) {
+      var refX, refY;
+      if (rawLines.length === 0) {
+        refX = startX; refY = startY;
+      } else {
+        var idx = rawLines.length - 1;
+        var lp = rawLines[idx][rawLines[idx].length - 1];
+        refX = lp[0]; refY = lp[1];
+      }
+      var newStroke = DataTool.line_to_stroke(simplifiedLine, [refX, refY]);
+      rawLines.push(simplifiedLine);
+      strokes = strokes.concat(newStroke);
+      redrawAll();
+
+      if (modelLoaded && strokes.length >= CONFIG.minSequenceLength) {
+        generateGuide();
+        setStatus("Guide shown - keep drawing!");
+      } else if (modelLoaded) {
+        setStatus("Drawing... (" + strokes.length + "/" + CONFIG.minSequenceLength + ")");
+      }
+    }
+    currentRawLine = [];
+  }
+
+  function generateGuide() {
+    if (!model || strokes.length === 0) return;
+    modelStateOrig = model.zero_state();
+    modelStateOrig = model.update(model.zero_input(), modelStateOrig);
+    for (var i = 0; i < strokes.length - 1; i++) {
+      modelStateOrig = model.update(strokes[i], modelStateOrig);
+    }
+    var last = strokes[strokes.length - 1];
+    var state = model.copy_state(modelStateOrig);
+    var dx = last[0], dy = last[1];
+    var p0 = last[2], p1 = last[3], p2 = last[4];
+
+    guideStrokes = [];
+    for (var step = 0; step < CONFIG.maxGuideSteps; step++) {
+      state = model.update([dx, dy, p0, p1, p2], state);
+      var pdf = model.get_pdf(state);
+      var s = model.sample(pdf, CONFIG.temperature);
+      dx = s[0]; dy = s[1]; p0 = s[2]; p1 = s[3]; p2 = s[4];
+      guideStrokes.push([dx, dy, p0, p1, p2]);
+      if (p2 === 1) break;
+    }
+    guideVisible = true;
+    redrawAll();
+  }
+
+  // Load model from injected JSON data (offline)
+  function loadModelFromData(data, category) {
+    currentCategory = category;
+    modelLoaded = false;
+    setModelLabel(category);
+    try {
+      model = new SketchRNN(data);
+      model.set_pixel_factor(CONFIG.screenScaleFactor);
+      modelLoaded = true;
+      hideLoading();
+      setStatus("Draw a " + category + "!");
+      notifyNative({ event: "modelLoaded", category: category });
+    } catch (e) {
+      hideLoading();
+      setStatus("Model load error");
+      console.error(e);
+    }
+  }
+
+  window.clearDrawing = function () {
+    hasStarted = false;
+    rawLines = []; currentRawLine = []; strokes = [];
+    guideStrokes = []; guideVisible = false;
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    setStatus("Draw a " + currentCategory + "!");
+  };
+
+  window.undoStroke = function () {
+    if (rawLines.length === 0) return;
+    rawLines.pop();
+    strokes = [];
+    for (var i = 0; i < rawLines.length; i++) {
+      var rx, ry;
+      if (i === 0) { rx = startX; ry = startY; }
+      else { var pl = rawLines[i-1]; var pp = pl[pl.length-1]; rx = pp[0]; ry = pp[1]; }
+      strokes = strokes.concat(DataTool.line_to_stroke(rawLines[i], [rx, ry]));
+    }
+    guideStrokes = []; guideVisible = false;
+    if (modelLoaded && strokes.length >= CONFIG.minSequenceLength) generateGuide();
+    redrawAll();
+    if (rawLines.length === 0) { hasStarted = false; setStatus("Draw a " + currentCategory + "!"); }
+  };
+
+  window.setTemperature = function (v) {
+    CONFIG.temperature = Math.max(0.1, Math.min(1.0, v));
+    if (guideVisible && strokes.length >= CONFIG.minSequenceLength) generateGuide();
+  };
+
+  function setStatus(t) { document.getElementById("status-text").textContent = t; }
+  function setModelLabel(n) { document.getElementById("model-label").textContent = n; }
+  function showLoading(t) { document.getElementById("loading-text").textContent = t; document.getElementById("loading-overlay").classList.remove("hidden"); }
+  function hideLoading() { document.getElementById("loading-overlay").classList.add("hidden"); }
+
+  function notifyNative(d) {
+    if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify(d));
+  }
+
+  function handleMessage(e) {
+    try {
+      var msg = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+      if (msg.action === "loadModel" && msg.modelData) {
+        showLoading("Loading " + msg.category + "...");
+        loadModelFromData(msg.modelData, msg.category);
+      } else if (msg.action === "clear") {
+        window.clearDrawing();
+      } else if (msg.action === "setTemperature") {
+        window.setTemperature(msg.value);
+      }
+    } catch (err) { console.error("msg error:", err); }
+  }
+  window.addEventListener("message", handleMessage);
+  document.addEventListener("message", handleMessage);
+
+  function init() {
+    initCanvas();
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointerleave", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("touchstart", function(e){e.preventDefault();}, {passive:false});
+    canvas.addEventListener("touchmove", function(e){e.preventDefault();}, {passive:false});
+    showLoading("Waiting for model...");
+    notifyNative({ event: "ready" });
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
+`;
+
+const htmlTemplate = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      touch-action: none;
+      background: #ffffff;
+      font-family: 'Segoe UI', sans-serif;
+    }
+    #status-bar {
+      position: fixed; top: 0; left: 0; right: 0;
+      height: 44px;
+      background: #f8f9fa;
+      border-bottom: 1px solid #e0e0e0;
+      display: flex; align-items: center; justify-content: center; gap: 12px;
+      font-size: 14px; color: #333;
+      z-index: 10;
+    }
+    #status-bar .model-name { font-weight: 600; color: #4A90D9; font-size: 16px; }
+    #status-bar .status-text { font-size: 12px; color: #999; }
+    #drawing-canvas {
+      position: fixed;
+      top: 44px; left: 0;
+      cursor: crosshair;
+    }
+    #toolbar {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      height: 50px;
+      background: #f8f9fa;
+      border-top: 1px solid #e0e0e0;
+      display: flex; align-items: center; justify-content: center; gap: 16px;
+      z-index: 10;
+    }
+    .tool-btn {
+      padding: 8px 24px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      background: white;
+      font-size: 14px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .tool-btn:active { background: #e8e8e8; }
+    #loading-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(255,255,255,0.92);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; color: #666;
+      z-index: 100;
+    }
+    #loading-overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="status-bar">
+    <span class="model-name" id="model-label">...</span>
+    <span class="status-text" id="status-text">Loading...</span>
+  </div>
+  <canvas id="drawing-canvas"></canvas>
+  <div id="toolbar">
+    <button class="tool-btn" onclick="clearDrawing()">Clear</button>
+    <button class="tool-btn" onclick="undoStroke()">Undo</button>
+  </div>
+  <div id="loading-overlay">
+    <span id="loading-text">Loading...</span>
+  </div>
+  <script>
+%%NUMJS%%
+  </script>
+  <script>
+%%SKETCH_RNN%%
+  </script>
+  <script>
+%%SKETCH_ENGINE%%
+  </script>
+</body>
+</html>`;
+
+// Build the final HTML
+let finalHTML = htmlTemplate
+  .replace('%%NUMJS%%', numjsCode)
+  .replace('%%SKETCH_RNN%%', sketchRNNCode)
+  .replace('%%SKETCH_ENGINE%%', sketchEngineCode);
+
+// Escape backticks and ${} for template literal usage
+const escapedHTML = finalHTML
+  .replace(/\\/g, '\\\\')
+  .replace(/`/g, '\\`')
+  .replace(/\$\{/g, '\\${');
+
+const outputModule = `// AUTO-GENERATED by scripts/build-html.js - DO NOT EDIT
+// Contains the complete drawing engine HTML with all libraries inlined
+export const DRAWING_HTML = \`${escapedHTML}\`;
+`;
+
+const outputPath = path.join(__dirname, '../src/utils/generatedHTML.js');
+fs.writeFileSync(outputPath, outputModule, 'utf8');
+
+console.log(`✅ Generated: ${outputPath}`);
+console.log(`   HTML size: ${(finalHTML.length / 1024).toFixed(0)} KB`);

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Sketch Guide</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      touch-action: none;
+      background: #ffffff;
+      font-family: 'Segoe UI', sans-serif;
+    }
+    #status-bar {
+      position: fixed; top: 0; left: 0; right: 0;
+      height: 48px;
+      background: #f8f9fa;
+      border-bottom: 1px solid #e0e0e0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; color: #333;
+      z-index: 10;
+    }
+    #status-bar .model-name { font-weight: 600; color: #4A90D9; }
+    #status-bar .status-text { margin-left: 12px; font-size: 13px; color: #999; }
+    #drawing-canvas {
+      position: fixed;
+      top: 48px; left: 0;
+      cursor: crosshair;
+    }
+    #toolbar {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      height: 56px;
+      background: #f8f9fa;
+      border-top: 1px solid #e0e0e0;
+      display: flex; align-items: center; justify-content: center; gap: 16px;
+      z-index: 10;
+    }
+    .tool-btn {
+      padding: 8px 20px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      background: white;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .tool-btn:active { background: #e8e8e8; }
+    #loading-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(255,255,255,0.9);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; color: #666;
+      z-index: 100;
+    }
+    #loading-overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="status-bar">
+    <span class="model-name" id="model-label">pig</span>
+    <span class="status-text" id="status-text">Draw something!</span>
+  </div>
+  <canvas id="drawing-canvas"></canvas>
+  <div id="toolbar">
+    <button class="tool-btn" id="btn-clear" onclick="clearDrawing()">Clear</button>
+    <button class="tool-btn" id="btn-undo" onclick="undoStroke()">Undo</button>
+  </div>
+  <div id="loading-overlay" class="hidden">
+    <span id="loading-text">Loading model...</span>
+  </div>
+
+  <script src="lib/numjs.js"></script>
+  <script src="lib/sketch_rnn.js"></script>
+  <script src="sketch.js"></script>
+</body>
+</html>
