@@ -1,0 +1,22 @@
+[
+  { "id": "pig", "label": "Pig", "emoji": "🐷", "displayText": "Draw a pig!" },
+  { "id": "cat", "label": "Cat", "emoji": "🐱", "displayText": "Draw a cat!" },
+  { "id": "dog", "label": "Dog", "emoji": "🐶", "displayText": "Draw a dog!" },
+  { "id": "bird", "label": "Bird", "emoji": "🐦", "displayText": "Draw a bird!" },
+  { "id": "fish", "label": "Fish", "emoji": "🐟", "displayText": "Draw a fish!" },
+  { "id": "flower", "label": "Flower", "emoji": "🌸", "displayText": "Draw a flower!" },
+  { "id": "butterfly", "label": "Butterfly", "emoji": "🦋", "displayText": "Draw a butterfly!" },
+  { "id": "elephant", "label": "Elephant", "emoji": "🐘", "displayText": "Draw an elephant!" },
+  { "id": "rabbit", "label": "Rabbit", "emoji": "🐰", "displayText": "Draw a rabbit!" },
+  { "id": "frog", "label": "Frog", "emoji": "🐸", "displayText": "Draw a frog!" },
+  { "id": "crab", "label": "Crab", "emoji": "🦀", "displayText": "Draw a crab!" },
+  { "id": "snail", "label": "Snail", "emoji": "🐌", "displayText": "Draw a snail!" },
+  { "id": "owl", "label": "Owl", "emoji": "🦉", "displayText": "Draw an owl!" },
+  { "id": "penguin", "label": "Penguin", "emoji": "🐧", "displayText": "Draw a penguin!" },
+  { "id": "whale", "label": "Whale", "emoji": "🐳", "displayText": "Draw a whale!" },
+  { "id": "octopus", "label": "Octopus", "emoji": "🐙", "displayText": "Draw an octopus!" },
+  { "id": "spider", "label": "Spider", "emoji": "🕷️", "displayText": "Draw a spider!" },
+  { "id": "bee", "label": "Bee", "emoji": "🐝", "displayText": "Draw a bee!" },
+  { "id": "bear", "label": "Bear", "emoji": "🐻", "displayText": "Draw a bear!" },
+  { "id": "lion", "label": "Lion", "emoji": "🦁", "displayText": "Draw a lion!" }
+]
