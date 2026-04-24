@@ -35,6 +35,13 @@ class AppAction(Enum):
     SAVE = auto()
 
 
+class AnimationState(Enum):
+    STATIC = auto()
+    PREPARING = auto()
+    ANIMATED = auto()
+    FAILED = auto()
+
+
 WINDOW_NAME = "stickerbook"
 
 
@@ -42,6 +49,10 @@ WINDOW_NAME = "stickerbook"
 class AnchoredSticker:
     sticker: StickerAsset
     anchor: HomographyAnchor
+    animation_state: AnimationState = AnimationState.STATIC
+    animation_video_path: Optional[Path] = None
+    animation_started_at: Optional[float] = None
+    animation_future: Optional["Future"] = None  # set while PREPARING
 
 
 class _PerfTracker:
