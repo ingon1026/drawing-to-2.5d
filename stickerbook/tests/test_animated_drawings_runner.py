@@ -4,10 +4,13 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+import yaml
 
 from animate.animated_drawings_runner import (
     AnimationResult,
+    JointSpreadError,
     composite_on_white_bg,
+    joint_spread_ratio,
     run_animated_drawings,
 )
 
@@ -65,7 +68,11 @@ def test_run_returns_success_when_video_and_cfg_produced(tmp_path: Path) -> None
         out_dir = Path(cmd[cmd.index("--output") + 1]) if "--output" in cmd else Path(cmd[-1])
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "video.gif").write_bytes(b"fake-gif")
-        (out_dir / "char_cfg.yaml").write_text("skeleton: []\n")
+        (out_dir / "char_cfg.yaml").write_text(
+            "skeleton:\n"
+            "  - {name: root, loc: [10, 10]}\n"
+            "  - {name: end, loc: [90, 90]}\n"
+        )
         result = subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
         return result
 
@@ -147,7 +154,11 @@ def test_run_writes_input_png_and_passes_path_to_subprocess(tmp_path: Path) -> N
         out_dir = Path(cmd[-1])
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "video.gif").write_bytes(b"g")
-        (out_dir / "char_cfg.yaml").write_text("skeleton: []\n")
+        (out_dir / "char_cfg.yaml").write_text(
+            "skeleton:\n"
+            "  - {name: root, loc: [10, 10]}\n"
+            "  - {name: end, loc: [90, 90]}\n"
+        )
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
     with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
@@ -161,3 +172,57 @@ def test_run_writes_input_png_and_passes_path_to_subprocess(tmp_path: Path) -> N
     assert str(input_png_path) in captured_cmd
     loaded = cv2.imread(str(input_png_path))
     assert loaded.shape == (32, 32, 3)
+
+
+def _write_char_cfg(path: Path, joints: list) -> None:
+    path.write_text(yaml.safe_dump({"skeleton": joints}))
+
+
+def test_joint_spread_ratio_large_for_spread_skeleton(tmp_path: Path) -> None:
+    cfg = tmp_path / "char_cfg.yaml"
+    _write_char_cfg(cfg, [
+        {"name": "root", "loc": [50, 50]},
+        {"name": "left_hand", "loc": [10, 10]},
+        {"name": "right_hand", "loc": [90, 90]},
+    ])
+    assert joint_spread_ratio(cfg, image_size=(100, 100)) > 0.5
+
+
+def test_joint_spread_ratio_small_for_bunched_skeleton(tmp_path: Path) -> None:
+    cfg = tmp_path / "char_cfg.yaml"
+    _write_char_cfg(cfg, [
+        {"name": "root", "loc": [50, 50]},
+        {"name": "left_hand", "loc": [51, 50]},
+        {"name": "right_hand", "loc": [50, 51]},
+    ])
+    assert joint_spread_ratio(cfg, image_size=(100, 100)) < 0.1
+
+
+def test_run_downgrades_success_to_failure_when_joints_bunched(tmp_path: Path) -> None:
+    tex = np.zeros((32, 32, 4), dtype=np.uint8)
+    tex[..., 3] = 255
+    ad_repo = tmp_path / "ad"
+    (ad_repo / "examples").mkdir(parents=True)
+    (ad_repo / "examples" / "image_to_animation.py").write_text("#")
+    work_dir = tmp_path / "work"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_dir = Path(cmd[-1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "video.gif").write_bytes(b"g")
+        # bunched joints
+        _write_char_cfg(out_dir / "char_cfg.yaml", [
+            {"name": "root", "loc": [50, 50]},
+            {"name": "left_hand", "loc": [50, 50]},
+            {"name": "right_hand", "loc": [50, 50]},
+        ])
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
+        result = run_animated_drawings(
+            texture_bgra=tex, motion="dab", ad_repo_path=ad_repo,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=5.0,
+        )
+
+    assert result.success is False
+    assert "bunched" in (result.error or "").lower() or "spread" in (result.error or "").lower()

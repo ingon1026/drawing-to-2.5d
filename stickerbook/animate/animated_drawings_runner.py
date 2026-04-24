@@ -5,10 +5,33 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
+import yaml
+
+
+class JointSpreadError(RuntimeError):
+    pass
+
+
+MIN_JOINT_SPREAD_RATIO = 0.15  # 이미지 대각선 대비 joint 범위
+
+
+def joint_spread_ratio(char_cfg_path: Path, image_size: Tuple[int, int]) -> float:
+    data = yaml.safe_load(Path(char_cfg_path).read_text())
+    joints = data.get("skeleton", []) if isinstance(data, dict) else []
+    locs = [j.get("loc") for j in joints if isinstance(j, dict) and "loc" in j]
+    if not locs:
+        return 0.0
+    xs = [p[0] for p in locs]
+    ys = [p[1] for p in locs]
+    dx = max(xs) - min(xs)
+    dy = max(ys) - min(ys)
+    w, h = image_size
+    diag = (w * w + h * h) ** 0.5
+    return ((dx * dx + dy * dy) ** 0.5) / max(diag, 1.0)
 
 
 def composite_on_white_bg(texture_bgra: np.ndarray) -> np.ndarray:
@@ -87,6 +110,16 @@ def run_animated_drawings(
             success=False, video_path=None, char_cfg_path=None,
             duration_sec=duration,
             error="no video artifact produced",
+        )
+
+    # Joint spread sanity check (R13)
+    h, w = texture_bgra.shape[:2]
+    spread = joint_spread_ratio(cfg, image_size=(w, h)) if cfg.exists() else 0.0
+    if spread < MIN_JOINT_SPREAD_RATIO:
+        return AnimationResult(
+            success=False, video_path=None, char_cfg_path=cfg if cfg.exists() else None,
+            duration_sec=duration,
+            error=f"joint spread {spread:.3f} below threshold {MIN_JOINT_SPREAD_RATIO} (bunched skeleton)",
         )
 
     return AnimationResult(
