@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import numpy as np
 
 from animate.animated_drawings_runner import AnimationResult
-from app import AnchoredSticker, App, AppAction, AnimationState
+from app import AnchoredSticker, App, AppAction, AnimationState, _PerfTracker
 from track.homography_anchor import HomographyAnchor
 
 
@@ -108,7 +108,7 @@ def test_poll_animation_transitions_to_animated_on_success(tmp_path: Path) -> No
     )
     app._anchored.append(item)
 
-    app._poll_animations()
+    app._poll_animations(_PerfTracker())
 
     assert item.animation_state is AnimationState.ANIMATED
     assert item.animation_video_path == vid
@@ -132,7 +132,17 @@ def test_poll_animation_transitions_to_failed_on_error() -> None:
     )
     app._anchored = [item]
 
-    app._poll_animations()
+    app._poll_animations(_PerfTracker())
 
     assert item.animation_state is AnimationState.FAILED
     assert item.animation_video_path is None
+
+
+def test_perf_report_includes_animation_metrics_when_present() -> None:
+    from app import _PerfTracker
+    pt = _PerfTracker()
+    pt.record("animation_success_sec", 8.5)
+    pt.record("animation_failure_sec", 3.2)
+    report = pt.report()
+    assert "animation_success_sec" in report
+    assert "animation_failure_sec" in report

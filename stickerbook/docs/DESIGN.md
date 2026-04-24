@@ -411,7 +411,7 @@ pyyaml>=6.0
 | M7 | 성능 측정 + 리스크 문서화 + README 정리 | Stage 2 포팅 준비 완료 | ✅ |
 | M7.5 | AnimatedDrawings 로컬 라운드트립 검증 | `texture.png` 입력으로 애니메이션 비디오 생성 | ✅ (TorchServe via Docker, dab GIF 생성 확인) |
 | M8 / M8.1 | Popup billboard 렌더 (정지 딱지) | 종이 기울여도 캐릭터 벌떡 서있음 | ✅ |
-| M9 | AD 라이브 통합 (춤추는 딱지) | 클릭 → 7–12초 → 종이 위에서 dab 춤 | ⏳ 예정 |
+| M9 | AD 라이브 통합 (춤추는 딱지) | 클릭 → 7–12초 → 종이 위에서 dab 춤 | ✅ (all 6 sub-milestones + 15 tasks complete) |
 
 각 마일스톤은 독립 commit / PR 단위. M1~M3 가 **검증의 핵심** (여기서 "잘못된 방향" 이었는지 일찍 알 수 있음).
 
@@ -602,14 +602,14 @@ class AnimatedStickerRenderer:
 
 ### 마일스톤
 
-| M | 내용 | 검증 기준 | 예상 |
-|---|---|---|---|
-| M9.1 | **출력 포맷 검증** (R8 해소): AD CLI 수동 → video.mp4 vs gif / 알파 채널 / 프레임 추출 방법 결정 | 재생 가능한 프레임 소스 확정 | 0.5일 |
-| M9.2 | **TorchServeRuntime** + 네이티브 설치: `animate/torchserve_runtime.py` + Java 체크 + health check | 앱 기동/종료 시 TorchServe 자동. Docker 없이 M7.5 동일 결과 | 1일 |
-| M9.3 | **AnimatedDrawingsRunner**: StickerAsset → AnimationResult (흰배경 합성, subprocess, 결과 파싱) | 테스트 입력 → video 생성. 여자아이류 실패 케이스 graceful | 1일 |
-| M9.4 | **AnimationWorker** 단일 큐 + `Sticker.animation_state` 통합 | 3번 클릭 → 순차 처리, 큐 상태 로그 | 0.5일 |
-| M9.5 | **AnimatedStickerRenderer** + compositor 통합 + SpinnerOverlay | 클릭 → 정지 딱지 → 스피너 → 춤. 카메라 이동해도 billboard 앵커 유지 | 1일 |
-| M9.6 | E2E + perf report (`animation_success_rate`, `animation_latency_p50/p95`) + README Docker 언급 제거 | 완료 기준 충족 | 0.5일 |
+| M | 내용 | 검증 기준 | 예상 | Status |
+|---|---|---|---|---|
+| M9.1 | **출력 포맷 검증** (R8 해소): AD CLI 수동 → video.mp4 vs gif / 알파 채널 / 프레임 추출 방법 결정 | 재생 가능한 프레임 소스 확정 | 0.5일 | ✅ |
+| M9.2 | **TorchServeRuntime** + 네이티브 설치: `animate/torchserve_runtime.py` + Java 체크 + health check | 앱 기동/종료 시 TorchServe 자동. Docker 없이 M7.5 동일 결과 | 1일 | ✅ |
+| M9.3 | **AnimatedDrawingsRunner**: StickerAsset → AnimationResult (흰배경 합성, subprocess, 결과 파싱) | 테스트 입력 → video 생성. 여자아이류 실패 케이스 graceful | 1일 | ✅ |
+| M9.4 | **AnimationWorker** 단일 큐 + `Sticker.animation_state` 통합 | 3번 클릭 → 순차 처리, 큐 상태 로그 | 0.5일 | ✅ |
+| M9.5 | **AnimatedStickerRenderer** + compositor 통합 + SpinnerOverlay | 클릭 → 정지 딱지 → 스피너 → 춤. 카메라 이동해도 billboard 앵커 유지 | 1일 | ✅ |
+| M9.6 | E2E + perf report (`animation_success_rate`, `animation_latency_p50/p95`) + README Docker 언급 제거 | 완료 기준 충족 | 0.5일 | ✅ |
 
 **총 4.5일 추정**. M9.1 이 가장 큰 리스크 — 결과에 따라 M9.5 프레임 읽기 전략 변경 가능.
 

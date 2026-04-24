@@ -83,7 +83,10 @@ class _PerfTracker:
         if not self._samples:
             return "  (no samples)"
         lines = []
-        order = ["capture", "poll", "detect", "track_render", "iter"]
+        order = [
+            "capture", "poll", "detect", "track_render", "iter",
+            "animation_success_sec", "animation_failure_sec",
+        ]
         ordered_names = [n for n in order if n in self._samples]
         ordered_names += [n for n in sorted(self._samples) if n not in order]
         for name in ordered_names:
@@ -210,7 +213,7 @@ class App:
         self._anchored.append(item)
         return item
 
-    def _poll_animations(self) -> None:
+    def _poll_animations(self, perf: "_PerfTracker") -> None:
         for item in self._anchored:
             if item.animation_state is not AnimationState.PREPARING:
                 continue
@@ -227,12 +230,14 @@ class App:
             if result.success and result.video_path is not None:
                 item.animation_state = AnimationState.ANIMATED
                 item.animation_video_path = result.video_path
+                perf.record("animation_success_sec", result.duration_sec)
                 print(
                     f"[app] sticker {id(item)} animated "
                     f"({result.duration_sec:.1f}s)"
                 )
             else:
                 item.animation_state = AnimationState.FAILED
+                perf.record("animation_failure_sec", result.duration_sec)
                 print(f"[app] animation failed: {result.error}")
             item.animation_future = None
 
@@ -281,7 +286,7 @@ class App:
                 perf.record("poll", perf_counter() - t0)
 
                 t0 = perf_counter()
-                self._poll_animations()
+                self._poll_animations(perf)
                 perf.record("poll_anim", perf_counter() - t0)
 
                 t0 = perf_counter()
