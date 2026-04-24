@@ -1,6 +1,15 @@
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
+
+import cv2
 import numpy as np
 
-from animate.animated_drawings_runner import composite_on_white_bg
+from animate.animated_drawings_runner import (
+    AnimationResult,
+    composite_on_white_bg,
+    run_animated_drawings,
+)
 
 
 def test_composite_places_opaque_pixels_over_white() -> None:
@@ -39,3 +48,116 @@ def test_composite_accepts_bgra_float_and_returns_uint8() -> None:
     tex[..., 3] = 255.0
     out = composite_on_white_bg(tex)
     assert out.dtype == np.uint8
+
+
+def test_run_returns_success_when_video_and_cfg_produced(tmp_path: Path) -> None:
+    tex = np.zeros((32, 32, 4), dtype=np.uint8)
+    tex[..., :3] = 200
+    tex[..., 3] = 255
+    ad_repo = tmp_path / "ad"
+    ad_repo.mkdir()
+    (ad_repo / "examples").mkdir()
+    (ad_repo / "examples" / "image_to_animation.py").write_text("# placeholder")
+    work_dir = tmp_path / "work"
+
+    def fake_run(cmd, *args, **kwargs):
+        # Simulate AD producing artifacts inside out dir
+        out_dir = Path(cmd[cmd.index("--output") + 1]) if "--output" in cmd else Path(cmd[-1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "video.gif").write_bytes(b"fake-gif")
+        (out_dir / "char_cfg.yaml").write_text("skeleton: []\n")
+        result = subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+        return result
+
+    with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
+        result = run_animated_drawings(
+            texture_bgra=tex,
+            motion="dab",
+            ad_repo_path=ad_repo,
+            work_dir=work_dir,
+            ad_python=Path("/fake/python"),
+            timeout_sec=5.0,
+        )
+
+    assert isinstance(result, AnimationResult)
+    assert result.success is True
+    assert result.video_path is not None
+    assert result.video_path.exists()
+    assert result.char_cfg_path is not None
+    assert result.error is None
+    assert result.duration_sec > 0
+
+
+def test_run_returns_failure_when_subprocess_nonzero_exit(tmp_path: Path) -> None:
+    tex = np.zeros((32, 32, 4), dtype=np.uint8)
+    tex[..., 3] = 255
+    ad_repo = tmp_path / "ad"
+    (ad_repo / "examples").mkdir(parents=True)
+    (ad_repo / "examples" / "image_to_animation.py").write_text("#")
+    work_dir = tmp_path / "work"
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=2, stdout="", stderr="boom")
+
+    with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
+        result = run_animated_drawings(
+            texture_bgra=tex, motion="dab", ad_repo_path=ad_repo,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=5.0,
+        )
+
+    assert result.success is False
+    assert result.video_path is None
+    assert "boom" in (result.error or "") or "exit" in (result.error or "").lower()
+
+
+def test_run_returns_failure_on_timeout(tmp_path: Path) -> None:
+    tex = np.zeros((32, 32, 4), dtype=np.uint8)
+    tex[..., 3] = 255
+    ad_repo = tmp_path / "ad"
+    (ad_repo / "examples").mkdir(parents=True)
+    (ad_repo / "examples" / "image_to_animation.py").write_text("#")
+    work_dir = tmp_path / "work"
+
+    def raise_timeout(cmd, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 1))
+
+    with patch("animate.animated_drawings_runner.subprocess.run", side_effect=raise_timeout):
+        result = run_animated_drawings(
+            texture_bgra=tex, motion="dab", ad_repo_path=ad_repo,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=0.1,
+        )
+
+    assert result.success is False
+    assert "timeout" in (result.error or "").lower()
+
+
+def test_run_writes_input_png_and_passes_path_to_subprocess(tmp_path: Path) -> None:
+    tex = np.zeros((32, 32, 4), dtype=np.uint8)
+    tex[..., :3] = 100
+    tex[..., 3] = 255
+    ad_repo = tmp_path / "ad"
+    (ad_repo / "examples").mkdir(parents=True)
+    (ad_repo / "examples" / "image_to_animation.py").write_text("#")
+    work_dir = tmp_path / "work"
+
+    captured_cmd: list = []
+
+    def fake_run(cmd, *args, **kwargs):
+        captured_cmd.extend(cmd)
+        out_dir = Path(cmd[-1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "video.gif").write_bytes(b"g")
+        (out_dir / "char_cfg.yaml").write_text("skeleton: []\n")
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
+        run_animated_drawings(
+            texture_bgra=tex, motion="dab", ad_repo_path=ad_repo,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=5.0,
+        )
+
+    input_png_path = work_dir / "input.png"
+    assert input_png_path.exists()
+    assert str(input_png_path) in captured_cmd
+    loaded = cv2.imread(str(input_png_path))
+    assert loaded.shape == (32, 32, 3)
