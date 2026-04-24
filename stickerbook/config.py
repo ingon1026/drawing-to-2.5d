@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple
@@ -49,3 +50,14 @@ def approximate_camera_intrinsics(frame_shape: Tuple[int, int], fov_deg: float =
     return np.array(
         [[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]], dtype=np.float64
     )
+
+
+# M9: AnimatedDrawings integration uses a separate conda env; overridable via env vars.
+TORCHSERVE_BIN = Path(os.environ.get(
+    "STICKERBOOK_TORCHSERVE_BIN",
+    "/home/ingon/miniconda3/envs/animated_drawings/bin/torchserve",
+))
+AD_PYTHON = Path(os.environ.get(
+    "STICKERBOOK_AD_PYTHON",
+    "/home/ingon/miniconda3/envs/animated_drawings/bin/python",
+))
