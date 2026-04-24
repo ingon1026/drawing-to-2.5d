@@ -198,6 +198,76 @@ def test_joint_spread_ratio_small_for_bunched_skeleton(tmp_path: Path) -> None:
     assert joint_spread_ratio(cfg, image_size=(100, 100)) < 0.1
 
 
+def test_run_passes_motion_cfg_when_present(tmp_path: Path) -> None:
+    tex = np.zeros((32, 32, 4), dtype=np.uint8)
+    tex[..., 3] = 255
+    ad_repo = tmp_path / "ad"
+    (ad_repo / "examples").mkdir(parents=True)
+    (ad_repo / "examples" / "image_to_animation.py").write_text("#")
+    motion_dir = ad_repo / "animated_drawings" / "config" / "motion"
+    motion_dir.mkdir(parents=True)
+    motion_cfg = motion_dir / "zombie.yaml"
+    motion_cfg.write_text("# fake zombie motion\n")
+
+    work_dir = tmp_path / "work"
+    captured_cmd: list = []
+
+    def fake_run(cmd, *args, **kwargs):
+        captured_cmd.extend(cmd)
+        out_dir = Path(cmd[-2])  # motion cfg is now the last arg, out_dir is second-to-last
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "video.gif").write_bytes(b"g")
+        (out_dir / "char_cfg.yaml").write_text(
+            "skeleton:\n  - {name: root, loc: [10, 10]}\n  - {name: end, loc: [90, 90]}\n"
+        )
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
+        result = run_animated_drawings(
+            texture_bgra=tex, motion="zombie", ad_repo_path=ad_repo,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=5.0,
+        )
+
+    assert result.success is True
+    assert str(motion_cfg) in captured_cmd
+    # Order: [python, script, input.png, out_dir, motion_cfg]
+    assert captured_cmd[-1] == str(motion_cfg)
+
+
+def test_run_falls_back_when_motion_cfg_missing(tmp_path: Path, capsys) -> None:
+    tex = np.zeros((32, 32, 4), dtype=np.uint8)
+    tex[..., 3] = 255
+    ad_repo = tmp_path / "ad"
+    (ad_repo / "examples").mkdir(parents=True)
+    (ad_repo / "examples" / "image_to_animation.py").write_text("#")
+    # Deliberately do NOT create the motion dir/file
+    work_dir = tmp_path / "work"
+    captured_cmd: list = []
+
+    def fake_run(cmd, *args, **kwargs):
+        captured_cmd.extend(cmd)
+        out_dir = Path(cmd[-1])  # motion missing → out_dir is last
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "video.gif").write_bytes(b"g")
+        (out_dir / "char_cfg.yaml").write_text(
+            "skeleton:\n  - {name: root, loc: [10, 10]}\n  - {name: end, loc: [90, 90]}\n"
+        )
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
+        result = run_animated_drawings(
+            texture_bgra=tex, motion="nonexistent_motion", ad_repo_path=ad_repo,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=5.0,
+        )
+
+    assert result.success is True
+    # argv should be exactly 4 items: python, script, input_png, out_dir
+    assert len(captured_cmd) == 4
+    # Warning was printed to stdout
+    captured = capsys.readouterr()
+    assert "not found" in captured.out
+
+
 def test_run_downgrades_success_to_failure_when_joints_bunched(tmp_path: Path) -> None:
     tex = np.zeros((32, 32, 4), dtype=np.uint8)
     tex[..., 3] = 255

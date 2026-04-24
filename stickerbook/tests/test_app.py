@@ -138,6 +138,57 @@ def test_poll_animation_transitions_to_failed_on_error() -> None:
     assert item.animation_video_path is None
 
 
+def test_poll_animation_cleans_work_dir_on_failure(tmp_path: Path) -> None:
+    app = App()
+    work_dir = tmp_path / "dead-job"
+    work_dir.mkdir()
+    (work_dir / "input.png").write_bytes(b"png")
+
+    mock_future = MagicMock()
+    mock_future.done.return_value = True
+    mock_future.result.return_value = AnimationResult(
+        success=False, video_path=None, char_cfg_path=None,
+        duration_sec=0.1, error="boom", work_dir=work_dir,
+    )
+    asset = MagicMock()
+    asset.source_region = (0, 0, 10, 10)
+    asset.texture_bgra = np.zeros((10, 10, 4), dtype=np.uint8)
+    item = AnchoredSticker(
+        sticker=asset, anchor=HomographyAnchor(),
+        animation_state=AnimationState.PREPARING,
+        animation_future=mock_future,
+    )
+    app._anchored = [item]
+
+    app._poll_animations(_PerfTracker())
+
+    assert item.animation_state is AnimationState.FAILED
+    assert not work_dir.exists()  # cleaned up
+
+
+def test_reset_stickers_cleans_each_work_dir(tmp_path: Path) -> None:
+    app = App()
+    work_a = tmp_path / "a"; work_a.mkdir()
+    work_b = tmp_path / "b"; work_b.mkdir()
+
+    def _stub_sticker_with_workdir(wd: Path) -> AnchoredSticker:
+        asset = MagicMock()
+        asset.source_region = (0, 0, 10, 10)
+        asset.texture_bgra = np.zeros((10, 10, 4), dtype=np.uint8)
+        return AnchoredSticker(
+            sticker=asset, anchor=HomographyAnchor(),
+            animation_state=AnimationState.ANIMATED,
+            animation_work_dir=wd,
+        )
+
+    app._anchored = [_stub_sticker_with_workdir(work_a), _stub_sticker_with_workdir(work_b)]
+    app._reset_stickers()
+
+    assert not work_a.exists()
+    assert not work_b.exists()
+    assert app._anchored == []
+
+
 def test_perf_report_includes_animation_metrics_when_present() -> None:
     from app import _PerfTracker
     pt = _PerfTracker()

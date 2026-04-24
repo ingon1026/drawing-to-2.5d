@@ -56,6 +56,7 @@ class AnimationResult:
     char_cfg_path: Optional[Path]
     duration_sec: float
     error: Optional[str]
+    work_dir: Optional[Path] = None  # job's isolated work directory (for cleanup)
 
 
 def run_animated_drawings(
@@ -77,6 +78,11 @@ def run_animated_drawings(
     out_dir = work_dir / "out"
 
     cmd = [str(ad_python), str(script), str(input_png), str(out_dir)]
+    motion_cfg = Path(ad_repo_path) / "animated_drawings" / "config" / "motion" / f"{motion}.yaml"
+    if motion_cfg.is_file():
+        cmd.append(str(motion_cfg))
+    else:
+        print(f"[ad] motion cfg not found: {motion_cfg}; using AD default")
     start = time.monotonic()
     try:
         result = subprocess.run(
@@ -90,6 +96,7 @@ def run_animated_drawings(
             success=False, video_path=None, char_cfg_path=None,
             duration_sec=time.monotonic() - start,
             error=f"timeout after {timeout_sec}s",
+            work_dir=work_dir,
         )
     duration = time.monotonic() - start
 
@@ -98,6 +105,7 @@ def run_animated_drawings(
             success=False, video_path=None, char_cfg_path=None,
             duration_sec=duration,
             error=f"exit {result.returncode}: {result.stderr[-500:]}",
+            work_dir=work_dir,
         )
 
     video_gif = out_dir / "video.gif"
@@ -110,6 +118,7 @@ def run_animated_drawings(
             success=False, video_path=None, char_cfg_path=None,
             duration_sec=duration,
             error="no video artifact produced",
+            work_dir=work_dir,
         )
 
     # Joint spread sanity check (R13)
@@ -120,6 +129,7 @@ def run_animated_drawings(
             success=False, video_path=None, char_cfg_path=cfg if cfg.exists() else None,
             duration_sec=duration,
             error=f"joint spread {spread:.3f} below threshold {MIN_JOINT_SPREAD_RATIO} (bunched skeleton)",
+            work_dir=work_dir,
         )
 
     return AnimationResult(
@@ -128,4 +138,5 @@ def run_animated_drawings(
         char_cfg_path=cfg if cfg.exists() else None,
         duration_sec=duration,
         error=None,
+        work_dir=work_dir,
     )

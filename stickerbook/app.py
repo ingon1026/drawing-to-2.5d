@@ -1,6 +1,7 @@
 """Main application state machine."""
 from __future__ import annotations
 
+import shutil
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ class AnchoredSticker:
     animation_video_path: Optional[Path] = None
     animation_started_at: Optional[float] = None
     animation_future: Optional["Future"] = None  # set while PREPARING
+    animation_work_dir: Optional[Path] = None  # for I2 cleanup
 
 
 class _PerfTracker:
@@ -137,11 +139,21 @@ class App:
             return AppAction.SAVE
         return None
 
+    def _cleanup_work_dir(self, work_dir: Optional[Path]) -> None:
+        if work_dir is None:
+            return
+        try:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"[app] work_dir cleanup failed ({work_dir}): {e}")
+
     def _reset_stickers(self) -> None:
         for r in self._animated_renderers.values():
             r.release()
         self._animated_renderers.clear()
         count = len(self._anchored)
+        for item in self._anchored:
+            self._cleanup_work_dir(item.animation_work_dir)
         self._anchored.clear()
         self.state = AppState.SCAN
         print(f"[app] reset — cleared {count} sticker(s)")
@@ -230,6 +242,7 @@ class App:
             if result.success and result.video_path is not None:
                 item.animation_state = AnimationState.ANIMATED
                 item.animation_video_path = result.video_path
+                item.animation_work_dir = result.work_dir
                 perf.record("animation_success_sec", result.duration_sec)
                 print(
                     f"[app] sticker {id(item)} animated "
@@ -239,6 +252,7 @@ class App:
                 item.animation_state = AnimationState.FAILED
                 perf.record("animation_failure_sec", result.duration_sec)
                 print(f"[app] animation failed: {result.error}")
+                self._cleanup_work_dir(result.work_dir)
             item.animation_future = None
 
     def run(self) -> None:
@@ -339,6 +353,8 @@ class App:
                 f"(stickers={len(self._anchored)}):"
             )
             print(perf.report())
+            for item in self._anchored:
+                self._cleanup_work_dir(item.animation_work_dir)
             for r in self._animated_renderers.values():
                 r.release()
             if self._animation_worker is not None:
