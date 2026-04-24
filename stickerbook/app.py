@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -109,11 +109,11 @@ class _PerfTracker:
 class App:
     def __init__(
         self,
-        camera_index: int = 0,
+        camera_source: Union[int, str] = 0,
         yolo_weights: str = "yolo26n.pt",
         sam_weights: Optional[str] = None,
     ) -> None:
-        self.camera_index = camera_index
+        self.camera_source = camera_source
         self.state = AppState.SCAN
         self._yolo_weights = yolo_weights
         self._sam_weights = sam_weights
@@ -256,7 +256,7 @@ class App:
             item.animation_future = None
 
     def run(self) -> None:
-        camera = Camera(index=self.camera_index)
+        camera = Camera(source=self.camera_source)
         detector = CandidateDetector(yolo_weights=self._yolo_weights)
         if self._sam_weights is not None:
             self._segmenter = Segmenter(self._sam_weights)
