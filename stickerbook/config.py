@@ -61,3 +61,19 @@ AD_PYTHON = Path(os.environ.get(
     "STICKERBOOK_AD_PYTHON",
     "/home/ingon/miniconda3/envs/animated_drawings/bin/python",
 ))
+AD_REPO_PATH = Path(os.environ.get(
+    "STICKERBOOK_AD_REPO",
+    str(Path.home() / "AR_book" / "AnimatedDrawings"),
+))
+ANIMATION_WORK_DIR = Path(os.environ.get(
+    "STICKERBOOK_AD_WORK_DIR",
+    "/tmp/stickerbook_ad",
+))
+TORCHSERVE_CONFIG_PATH = Path(os.environ.get(
+    "STICKERBOOK_TS_CONFIG",
+    "/tmp/ts_config.properties",
+))
+TORCHSERVE_MODELS = [
+    "drawn_humanoid_detector.mar",
+    "drawn_humanoid_pose_estimator.mar",
+]

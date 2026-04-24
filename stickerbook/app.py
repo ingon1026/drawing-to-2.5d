@@ -13,13 +13,26 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from animate.animated_drawings_runner import AnimationResult, run_animated_drawings
+from animate.animation_worker import AnimationWorker
+from animate.torchserve_runtime import TorchServeRuntime
 from capture.camera import Camera
-from config import CAPTURES_DIR
+from config import (
+    AD_PYTHON,
+    AD_REPO_PATH,
+    ANIMATION_WORK_DIR,
+    CAPTURES_DIR,
+    TORCHSERVE_BIN,
+    TORCHSERVE_CONFIG_PATH,
+    TORCHSERVE_MODELS,
+)
 from detect.candidate_detector import CandidateDetector
 from export.animated_drawings import save_sticker
 from extract.segmenter import Segmenter, StickerAsset
+from render.animated_sticker_renderer import AnimatedStickerRenderer
 from render.overlay import draw_candidate_boxes
-from render.tilt_renderer import render_sticker_as_billboard
+from render.spinner_overlay import draw_spinner
+from render.tilt_renderer import render_bgra_as_billboard, render_sticker_as_billboard
 from track.homography_anchor import HomographyAnchor
 
 
@@ -104,6 +117,10 @@ class App:
         self._anchored: List[AnchoredSticker] = []
         self._segmenter: Optional[Segmenter] = None
         self._executor: Optional[ThreadPoolExecutor] = None
+        self._torchserve: Optional[TorchServeRuntime] = None
+        self._animation_worker: Optional[AnimationWorker] = None
+        self._animated_renderers: Dict[int, AnimatedStickerRenderer] = {}
+        self._spinner_phase: float = 0.0
 
     def _handle_key(self, key: int) -> Optional[AppAction]:
         if key == -1:
@@ -118,6 +135,9 @@ class App:
         return None
 
     def _reset_stickers(self) -> None:
+        for r in self._animated_renderers.values():
+            r.release()
+        self._animated_renderers.clear()
         count = len(self._anchored)
         self._anchored.clear()
         self.state = AppState.SCAN
@@ -160,11 +180,12 @@ class App:
                             f"(featureless region); sticker discarded"
                         )
                     else:
-                        self._anchored.append(AnchoredSticker(sticker=sticker, anchor=anchor))
+                        item = self._promote_to_live(sticker, anchor)
                         x, y, w, h = sticker.source_region
                         print(
                             f"[app] sticker #{len(self._anchored)} created + anchored "
-                            f"at ({x},{y}) size {w}x{h}"
+                            f"at ({x},{y}) size {w}x{h}, "
+                            f"animation_state={item.animation_state.name}"
                         )
                 except Exception as e:
                     print(f"[app] segmentation failed: {e}")
@@ -178,12 +199,69 @@ class App:
         else:
             self.state = AppState.SCAN
 
+    def _promote_to_live(
+        self, sticker_asset: StickerAsset, anchor: HomographyAnchor
+    ) -> AnchoredSticker:
+        item = AnchoredSticker(sticker=sticker_asset, anchor=anchor)
+        if self._animation_worker is not None:
+            item.animation_future = self._animation_worker.submit(sticker_asset.texture_bgra)
+            item.animation_state = AnimationState.PREPARING
+            item.animation_started_at = perf_counter()
+        self._anchored.append(item)
+        return item
+
+    def _poll_animations(self) -> None:
+        for item in self._anchored:
+            if item.animation_state is not AnimationState.PREPARING:
+                continue
+            fut = item.animation_future
+            if fut is None or not fut.done():
+                continue
+            try:
+                result: AnimationResult = fut.result()
+            except Exception as e:
+                print(f"[app] animation worker raised: {e}")
+                item.animation_state = AnimationState.FAILED
+                item.animation_future = None
+                continue
+            if result.success and result.video_path is not None:
+                item.animation_state = AnimationState.ANIMATED
+                item.animation_video_path = result.video_path
+                print(
+                    f"[app] sticker {id(item)} animated "
+                    f"({result.duration_sec:.1f}s)"
+                )
+            else:
+                item.animation_state = AnimationState.FAILED
+                print(f"[app] animation failed: {result.error}")
+            item.animation_future = None
+
     def run(self) -> None:
         camera = Camera(index=self.camera_index)
         detector = CandidateDetector(yolo_weights=self._yolo_weights)
         if self._sam_weights is not None:
             self._segmenter = Segmenter(self._sam_weights)
             self._executor = ThreadPoolExecutor(max_workers=1)
+            if not TORCHSERVE_CONFIG_PATH.exists():
+                TORCHSERVE_CONFIG_PATH.write_text("default_workers_per_model=1\n")
+            self._torchserve = TorchServeRuntime(
+                model_store=AD_REPO_PATH / "torchserve" / "model-store",
+                config_path=TORCHSERVE_CONFIG_PATH,
+                models=TORCHSERVE_MODELS,
+                torchserve_bin=TORCHSERVE_BIN,
+            )
+            try:
+                self._torchserve.start()
+                self._animation_worker = AnimationWorker(
+                    runner=run_animated_drawings,
+                    ad_repo_path=AD_REPO_PATH,
+                    work_dir_base=ANIMATION_WORK_DIR,
+                    ad_python=AD_PYTHON,
+                )
+            except Exception as e:
+                print(f"[app] WARNING: animation unavailable ({e}); stickers will remain STATIC")
+                self._torchserve = None
+                self._animation_worker = None
 
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(WINDOW_NAME, self._on_mouse)
@@ -203,6 +281,10 @@ class App:
                 perf.record("poll", perf_counter() - t0)
 
                 t0 = perf_counter()
+                self._poll_animations()
+                perf.record("poll_anim", perf_counter() - t0)
+
+                t0 = perf_counter()
                 boxes = detector.detect(raw)
                 perf.record("detect", perf_counter() - t0)
                 draw_candidate_boxes(display, boxes)
@@ -212,7 +294,28 @@ class App:
                     state = item.anchor.update(raw)
                     if state.homography is None:
                         continue
-                    render_sticker_as_billboard(display, item.sticker, state.homography)
+                    if item.animation_state is AnimationState.ANIMATED:
+                        renderer = self._animated_renderers.get(id(item))
+                        if renderer is None and item.animation_video_path is not None:
+                            renderer = AnimatedStickerRenderer(item.animation_video_path)
+                            self._animated_renderers[id(item)] = renderer
+                        if renderer is not None:
+                            bgra = renderer.next_frame_bgra()
+                            render_bgra_as_billboard(
+                                frame=display,
+                                texture_bgra=bgra,
+                                source_region=item.sticker.source_region,
+                                homography=state.homography,
+                            )
+                        else:
+                            render_sticker_as_billboard(display, item.sticker, state.homography)
+                    else:
+                        render_sticker_as_billboard(display, item.sticker, state.homography)
+                        if item.animation_state is AnimationState.PREPARING:
+                            x, y, w, h = item.sticker.source_region
+                            cx, cy = x + w // 2, y + h // 2
+                            self._spinner_phase += 0.1
+                            draw_spinner(display, (cx, cy), min(w, h) // 4, self._spinner_phase)
                 perf.record("track_render", perf_counter() - t0)
 
                 cv2.imshow(WINDOW_NAME, display)
@@ -231,6 +334,12 @@ class App:
                 f"(stickers={len(self._anchored)}):"
             )
             print(perf.report())
+            for r in self._animated_renderers.values():
+                r.release()
+            if self._animation_worker is not None:
+                self._animation_worker.shutdown(wait=False)
+            if self._torchserve is not None:
+                self._torchserve.stop()
             if self._executor is not None:
                 self._executor.shutdown(wait=False)
             camera.release()
