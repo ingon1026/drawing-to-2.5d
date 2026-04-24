@@ -113,6 +113,77 @@ def billboard_corners_2d(
     )
 
 
+def render_bgra_as_billboard(
+    frame: np.ndarray,
+    texture_bgra: np.ndarray,
+    source_region: Tuple[int, int, int, int],
+    homography: np.ndarray,
+    *,
+    enable_shadow: bool = True,
+    lift_image_pixels: Optional[float] = None,
+    popup_lift_ratio: float = 1.0,
+    shadow_alpha: float = 0.4,
+    shadow_blur: int = 4,
+) -> None:
+    """Render a BGRA texture as a screen-upright billboard whose base follows the paper.
+
+    Same geometry as `render_sticker_as_billboard` but accepts a raw BGRA texture
+    plus `source_region`, enabling per-frame texture swapping (e.g. animation).
+    Shadow silhouette is derived from the alpha channel of `texture_bgra`.
+    """
+    if not np.isfinite(homography).all() or abs(np.linalg.det(homography)) < 1e-12:
+        return
+
+    projected = billboard_corners_2d(
+        homography,
+        source_region,
+        lift_image_pixels=lift_image_pixels,
+        popup_lift_ratio=popup_lift_ratio,
+    )
+    if not np.isfinite(projected).all():
+        return
+
+    th, tw = texture_bgra.shape[:2]
+    tex_corners = np.array(
+        [[0, 0], [tw, 0], [tw, th], [0, th]], dtype=np.float32
+    )
+
+    try:
+        M = cv2.getPerspectiveTransform(tex_corners, projected)
+    except cv2.error:
+        return
+
+    h, w = frame.shape[:2]
+    warped = cv2.warpPerspective(
+        texture_bgra,
+        M,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0, 0),
+    )
+
+    if enable_shadow:
+        mask_u8_from_alpha = texture_bgra[..., 3]
+        warped_mask = cv2.warpPerspective(
+            mask_u8_from_alpha, M, (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        shadow = warped_mask.astype(np.float32) / 255.0
+        k = shadow_blur * 2 + 1
+        shadow = cv2.GaussianBlur(shadow, (k, k), sigmaX=0)
+        shadow *= shadow_alpha
+        frame_f = frame.astype(np.float32)
+        frame[:] = (frame_f * (1.0 - shadow[..., None])).astype(np.uint8)
+
+    alpha = (warped[..., 3].astype(np.float32) / 255.0)[..., None]
+    rgb = warped[..., :3].astype(np.float32)
+    frame_f = frame.astype(np.float32)
+    frame[:] = (frame_f * (1.0 - alpha) + rgb * alpha).astype(np.uint8)
+
+
 def render_sticker_as_billboard(
     frame: np.ndarray,
     sticker: StickerAsset,
@@ -130,56 +201,17 @@ def render_sticker_as_billboard(
     pixels so the pop-up effect is visible regardless of how the paper was
     oriented when the sticker was captured.
     """
-    if not np.isfinite(homography).all() or abs(np.linalg.det(homography)) < 1e-12:
-        return
-
-    projected = billboard_corners_2d(
-        homography,
-        sticker.source_region,
+    render_bgra_as_billboard(
+        frame=frame,
+        texture_bgra=sticker.texture_bgra,
+        source_region=sticker.source_region,
+        homography=homography,
+        enable_shadow=enable_shadow,
         lift_image_pixels=lift_image_pixels,
         popup_lift_ratio=popup_lift_ratio,
+        shadow_alpha=shadow_alpha,
+        shadow_blur=shadow_blur,
     )
-    if not np.isfinite(projected).all():
-        return
-
-    th, tw = sticker.texture_bgra.shape[:2]
-    tex_corners = np.array(
-        [[0, 0], [tw, 0], [tw, th], [0, th]], dtype=np.float32
-    )
-
-    try:
-        M = cv2.getPerspectiveTransform(tex_corners, projected)
-    except cv2.error:
-        return
-
-    h, w = frame.shape[:2]
-    warped = cv2.warpPerspective(
-        sticker.texture_bgra,
-        M,
-        (w, h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0, 0),
-    )
-
-    if enable_shadow:
-        warped_mask = cv2.warpPerspective(
-            sticker.mask_u8, M, (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        shadow = warped_mask.astype(np.float32) / 255.0
-        k = shadow_blur * 2 + 1
-        shadow = cv2.GaussianBlur(shadow, (k, k), sigmaX=0)
-        shadow *= shadow_alpha
-        frame_f = frame.astype(np.float32)
-        frame[:] = (frame_f * (1.0 - shadow[..., None])).astype(np.uint8)
-
-    alpha = (warped[..., 3].astype(np.float32) / 255.0)[..., None]
-    rgb = warped[..., :3].astype(np.float32)
-    frame_f = frame.astype(np.float32)
-    frame[:] = (frame_f * (1.0 - alpha) + rgb * alpha).astype(np.uint8)
 
 
 def render_sticker_with_homography(
