@@ -110,7 +110,7 @@ Expected observations (가능성):
 
 - [ ] **Step 4: 재생 전략 확정 및 기록**
 
-Create `/home/ingon/AR_book/stickerbook/docs/M9_1_OUTPUT_FORMAT.md`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/docs/M9_1_OUTPUT_FORMAT.md`:
 
 ```markdown
 # M9.1 — AnimatedDrawings 출력 포맷 검증 결과
@@ -152,101 +152,103 @@ Create `/home/ingon/AR_book/stickerbook/docs/M9_1_OUTPUT_FORMAT.md`:
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/ingon/AR_book/stickerbook
+cd /home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook
 git add docs/M9_1_OUTPUT_FORMAT.md
 git commit -m "docs(m9): record AnimatedDrawings output format verification"
 ```
 
 ---
 
-## Task 2: M9.2 — TorchServe 네이티브 설치 검증
+## Task 2: Config — 절대 경로 상수 (2-env 구조)
 
-**목적:** Docker 없이 `java + torchserve` 로 M7.5 결과를 재현할 수 있는지 확인. 이후 코드가 의존할 수 있는 환경을 만든다.
+**배경:** stickerbook 앱은 시스템 Python 3.12 (`/usr/bin/python3`) 에서 실행되고 있고, AnimatedDrawings + TorchServe 는 이미 `animated_drawings` conda env (`/home/ingon/miniconda3/envs/animated_drawings/`) 에 설치·검증되어 있다 (M7.5). 따라서 네이티브 설치 단계는 **불필요**. 대신 stickerbook 이 AD env 바이너리를 절대 경로로 호출하도록 config 상수만 추가한다.
 
 **Files:**
-- Modify: `requirements.txt`
+- Modify: `config.py` (절대 경로 상수 추가)
+- Modify: `tests/conftest.py` 또는 신규 `tests/test_config_paths.py` — 경로 유효성 테스트
 
-- [ ] **Step 1: Java 설치 확인**
+- [ ] **Step 1: Write failing test for new config constants**
+
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/tests/test_config_paths.py`:
+```python
+from pathlib import Path
+
+import config
+
+
+def test_config_exposes_torchserve_bin_path_pointing_to_animated_drawings_env() -> None:
+    # Default points to the animated_drawings conda env that already has torchserve
+    assert isinstance(config.TORCHSERVE_BIN, Path)
+    assert "animated_drawings" in str(config.TORCHSERVE_BIN)
+    assert str(config.TORCHSERVE_BIN).endswith("/torchserve")
+
+
+def test_config_exposes_ad_python_path_pointing_to_animated_drawings_env() -> None:
+    assert isinstance(config.AD_PYTHON, Path)
+    assert "animated_drawings" in str(config.AD_PYTHON)
+    assert str(config.AD_PYTHON).endswith("/python")
+
+
+def test_config_paths_overridable_via_env_vars(monkeypatch) -> None:
+    monkeypatch.setenv("STICKERBOOK_TORCHSERVE_BIN", "/custom/ts")
+    monkeypatch.setenv("STICKERBOOK_AD_PYTHON", "/custom/py")
+    import importlib
+    import config as config_module
+    importlib.reload(config_module)
+    try:
+        assert str(config_module.TORCHSERVE_BIN) == "/custom/ts"
+        assert str(config_module.AD_PYTHON) == "/custom/py"
+    finally:
+        importlib.reload(config_module)  # restore defaults
+```
+
+- [ ] **Step 2: Run test to verify it fails**
 
 Run:
 ```bash
-java -version 2>&1
+cd /home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook
+/usr/bin/python3 -m pytest tests/test_config_paths.py -v
 ```
-Expected: openjdk 11 또는 17 이상. 없으면:
-```bash
-sudo apt install openjdk-17-jre-headless
-java -version 2>&1
+Expected: `AttributeError: module 'config' has no attribute 'TORCHSERVE_BIN'`.
+
+- [ ] **Step 3: Implement constants in `config.py`**
+
+Read current `config.py` first, then append at bottom (ensuring `import os` and `from pathlib import Path` already imported at top — add if missing):
+
+```python
+# M9: AnimatedDrawings integration uses a separate conda env.
+# These paths are overridable via env vars for portability.
+TORCHSERVE_BIN = Path(os.environ.get(
+    "STICKERBOOK_TORCHSERVE_BIN",
+    "/home/ingon/miniconda3/envs/animated_drawings/bin/torchserve",
+))
+AD_PYTHON = Path(os.environ.get(
+    "STICKERBOOK_AD_PYTHON",
+    "/home/ingon/miniconda3/envs/animated_drawings/bin/python",
+))
 ```
-Expected after install: `openjdk version "17.x.x"`.
 
-- [ ] **Step 2: TorchServe + archiver pip 설치**
-
-현재 venv/conda 환경 확인 (stickerbook 용):
-```bash
-which python && python --version
-```
-
-설치:
-```bash
-pip install torchserve torch-model-archiver
-which torchserve
-torchserve --version
-```
-Expected: `TorchServe Version is X.Y.Z` (≥ 0.9).
-
-- [ ] **Step 3: 기존 `.mar` 모델 재사용 확인**
+- [ ] **Step 4: Run tests**
 
 Run:
 ```bash
-ls -la ~/AR_book/AnimatedDrawings/torchserve/model-store/ 2>/dev/null
+/usr/bin/python3 -m pytest tests/test_config_paths.py -v
 ```
-Expected: `drawn_humanoid_detector.mar`, `drawn_humanoid_pose_estimator.mar` 둘 다 존재.
+Expected: 3 passed.
 
-- [ ] **Step 4: 수동 기동 + health 확인**
-
-Run:
-```bash
-mkdir -p /tmp/ts_logs
-torchserve --start \
-  --model-store ~/AR_book/AnimatedDrawings/torchserve/model-store \
-  --ts-config /tmp/ts_config.properties \
-  --models drawn_humanoid_detector.mar drawn_humanoid_pose_estimator.mar \
-  --disable-token-auth \
-  --no-config-snapshots \
-  --foreground 2>&1 | tee /tmp/ts_logs/stdout.log &
-TS_PID=$!
-sleep 10
-curl -s -4 http://127.0.0.1:8080/ping
-```
-Expected: `{"status": "Healthy"}`.
-
-Cleanup:
-```bash
-torchserve --stop
-```
-
-- [ ] **Step 5: requirements.txt 업데이트**
-
-Modify `/home/ingon/AR_book/stickerbook/requirements.txt` — add:
-```
-# Animation (M9): runs AnimatedDrawings via TorchServe natively.
-# System deps: openjdk-17-jre-headless (apt).
-# Galaxy 포팅 시 전부 제거 예정 — onnxruntime-mobile 로 대체.
-torchserve>=0.9
-torch-model-archiver>=0.9
-```
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-cd /home/ingon/AR_book/stickerbook
-git add requirements.txt
-git commit -m "chore(m9): add torchserve native deps for AD integration"
+cd /home/ingon/AR_book/drawing-to-2.5d-repo
+git add stickerbook/config.py stickerbook/tests/test_config_paths.py
+git commit -m "feat(m9): add TORCHSERVE_BIN + AD_PYTHON config paths (Task 2)"
 ```
 
 ---
 
-## Task 3: `animate/torchserve_runtime.py` — 데이터 타입 + 환경 체크
+## Task 3: `animate/torchserve_runtime.py` — 환경 체크
+
+**목적:** `animate` 패키지 초기화 + AD env 의 torchserve 바이너리가 실제로 존재하는지 사전 검증.
 
 **Files:**
 - Create: `animate/__init__.py`
@@ -255,14 +257,13 @@ git commit -m "chore(m9): add torchserve native deps for AD integration"
 
 - [ ] **Step 1: 빈 패키지 생성**
 
-Create `/home/ingon/AR_book/stickerbook/animate/__init__.py` (empty file).
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/animate/__init__.py` (empty file).
 
 - [ ] **Step 2: Write failing test for environment check helper**
 
-Create `/home/ingon/AR_book/stickerbook/tests/test_torchserve_runtime.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/tests/test_torchserve_runtime.py`:
 ```python
-import subprocess
-from unittest.mock import patch
+from pathlib import Path
 
 import pytest
 
@@ -272,61 +273,49 @@ from animate.torchserve_runtime import (
 )
 
 
-def test_check_environment_reports_ok_when_java_and_torchserve_present() -> None:
-    def fake_which(name: str) -> str | None:
-        return {"java": "/usr/bin/java", "torchserve": "/usr/local/bin/torchserve"}.get(name)
+def test_check_environment_reports_ok_when_bin_exists(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "torchserve"
+    fake_bin.write_text("#!/bin/sh\n")
+    fake_bin.chmod(0o755)
 
-    with patch("animate.torchserve_runtime.shutil.which", side_effect=fake_which):
-        result = check_environment()
+    result = check_environment(torchserve_bin=fake_bin)
 
     assert isinstance(result, EnvironmentCheckResult)
     assert result.ok is True
     assert result.missing == []
 
 
-def test_check_environment_reports_missing_java() -> None:
-    def fake_which(name: str) -> str | None:
-        return {"torchserve": "/usr/local/bin/torchserve"}.get(name)
-
-    with patch("animate.torchserve_runtime.shutil.which", side_effect=fake_which):
-        result = check_environment()
-
-    assert result.ok is False
-    assert "java" in result.missing
-    # 설치 가이드 메시지에 apt install 언급
-    assert "apt" in result.install_hint.lower()
-
-
-def test_check_environment_reports_missing_torchserve() -> None:
-    def fake_which(name: str) -> str | None:
-        return {"java": "/usr/bin/java"}.get(name)
-
-    with patch("animate.torchserve_runtime.shutil.which", side_effect=fake_which):
-        result = check_environment()
+def test_check_environment_reports_missing_when_bin_not_found(tmp_path: Path) -> None:
+    result = check_environment(torchserve_bin=tmp_path / "nope" / "torchserve")
 
     assert result.ok is False
     assert "torchserve" in result.missing
-    assert "pip install torchserve" in result.install_hint
+    assert "STICKERBOOK_TORCHSERVE_BIN" in result.install_hint
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
 
 Run:
 ```bash
-cd /home/ingon/AR_book/stickerbook
-pytest tests/test_torchserve_runtime.py -v
+cd /home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook
+/usr/bin/python3 -m pytest tests/test_torchserve_runtime.py -v
 ```
 Expected: `ModuleNotFoundError: No module named 'animate.torchserve_runtime'`.
 
 - [ ] **Step 4: Write minimal implementation**
 
-Create `/home/ingon/AR_book/stickerbook/animate/torchserve_runtime.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/animate/torchserve_runtime.py`:
 ```python
-"""TorchServe native lifecycle for AnimatedDrawings inference."""
+"""TorchServe lifecycle wrapper for AnimatedDrawings inference.
+
+Invokes an externally-installed torchserve binary (living in the
+`animated_drawings` conda env) via absolute path — stickerbook's own
+python env does NOT install torchserve.
+"""
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List
 
 
@@ -337,23 +326,23 @@ class EnvironmentCheckResult:
     install_hint: str = ""
 
 
-def check_environment() -> EnvironmentCheckResult:
+def check_environment(torchserve_bin: Path) -> EnvironmentCheckResult:
     missing: List[str] = []
-    if shutil.which("java") is None:
-        missing.append("java")
-    if shutil.which("torchserve") is None:
+    if not Path(torchserve_bin).is_file():
         missing.append("torchserve")
 
-    hints: List[str] = []
-    if "java" in missing:
-        hints.append("sudo apt install openjdk-17-jre-headless")
-    if "torchserve" in missing:
-        hints.append("pip install torchserve torch-model-archiver")
+    install_hint = ""
+    if missing:
+        install_hint = (
+            f"torchserve not found at {torchserve_bin}. "
+            f"Install into the animated_drawings conda env, or set "
+            f"STICKERBOOK_TORCHSERVE_BIN to override."
+        )
 
     return EnvironmentCheckResult(
         ok=not missing,
         missing=missing,
-        install_hint=" && ".join(hints),
+        install_hint=install_hint,
     )
 ```
 
@@ -361,15 +350,16 @@ def check_environment() -> EnvironmentCheckResult:
 
 Run:
 ```bash
-pytest tests/test_torchserve_runtime.py -v
+/usr/bin/python3 -m pytest tests/test_torchserve_runtime.py -v
 ```
-Expected: 3 passed.
+Expected: 2 passed.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add animate/__init__.py animate/torchserve_runtime.py tests/test_torchserve_runtime.py
-git commit -m "feat(m9): add torchserve env check (Task 3)"
+cd /home/ingon/AR_book/drawing-to-2.5d-repo
+git add stickerbook/animate/__init__.py stickerbook/animate/torchserve_runtime.py stickerbook/tests/test_torchserve_runtime.py
+git commit -m "feat(m9): add torchserve bin existence check (Task 3)"
 ```
 
 ---
@@ -390,11 +380,19 @@ from unittest.mock import MagicMock, patch
 from animate.torchserve_runtime import TorchServeRuntime, TorchServeNotReady
 
 
+def _fake_torchserve_bin(tmp_path: Path) -> Path:
+    bin_path = tmp_path / "torchserve"
+    bin_path.write_text("#!/bin/sh\n")
+    bin_path.chmod(0o755)
+    return bin_path
+
+
 def test_runtime_start_spawns_subprocess_and_polls_health(tmp_path: Path) -> None:
     model_store = tmp_path / "model-store"
     model_store.mkdir()
     config_path = tmp_path / "ts_config.properties"
     config_path.write_text("default_workers_per_model=1\n")
+    bin_path = _fake_torchserve_bin(tmp_path)
 
     mock_proc = MagicMock()
     mock_proc.poll.return_value = None  # still running
@@ -408,6 +406,7 @@ def test_runtime_start_spawns_subprocess_and_polls_health(tmp_path: Path) -> Non
             model_store=model_store,
             config_path=config_path,
             models=["drawn_humanoid_detector.mar"],
+            torchserve_bin=bin_path,
             health_url="http://127.0.0.1:8080/ping",
             poll_interval_sec=0.1,
             health_timeout_sec=5.0,
@@ -416,7 +415,7 @@ def test_runtime_start_spawns_subprocess_and_polls_health(tmp_path: Path) -> Non
 
     assert popen.called
     args = popen.call_args[0][0]
-    assert "torchserve" in args[0]
+    assert args[0] == str(bin_path)
     assert "--start" in args
     assert "--model-store" in args
     assert str(model_store) in args
@@ -428,6 +427,7 @@ def test_runtime_start_raises_if_health_never_ok(tmp_path: Path) -> None:
     model_store.mkdir()
     config_path = tmp_path / "ts_config.properties"
     config_path.touch()
+    bin_path = _fake_torchserve_bin(tmp_path)
 
     mock_proc = MagicMock()
     mock_proc.poll.return_value = None
@@ -439,6 +439,7 @@ def test_runtime_start_raises_if_health_never_ok(tmp_path: Path) -> None:
             model_store=model_store,
             config_path=config_path,
             models=["m.mar"],
+            torchserve_bin=bin_path,
             health_url="http://127.0.0.1:8080/ping",
             poll_interval_sec=0.01,
             health_timeout_sec=0.1,
@@ -447,11 +448,28 @@ def test_runtime_start_raises_if_health_never_ok(tmp_path: Path) -> None:
             rt.start()
 
 
+def test_runtime_start_raises_when_bin_missing(tmp_path: Path) -> None:
+    model_store = tmp_path / "model-store"
+    model_store.mkdir()
+    config_path = tmp_path / "ts_config.properties"
+    config_path.touch()
+
+    rt = TorchServeRuntime(
+        model_store=model_store,
+        config_path=config_path,
+        models=["m.mar"],
+        torchserve_bin=tmp_path / "does_not_exist",
+    )
+    with pytest.raises(TorchServeNotReady):
+        rt.start()
+
+
 def test_runtime_stop_invokes_torchserve_stop(tmp_path: Path) -> None:
     model_store = tmp_path / "model-store"
     model_store.mkdir()
     config_path = tmp_path / "ts_config.properties"
     config_path.touch()
+    bin_path = _fake_torchserve_bin(tmp_path)
 
     mock_proc = MagicMock()
 
@@ -463,6 +481,7 @@ def test_runtime_stop_invokes_torchserve_stop(tmp_path: Path) -> None:
             model_store=model_store,
             config_path=config_path,
             models=["m.mar"],
+            torchserve_bin=bin_path,
             health_url="http://127.0.0.1:8080/ping",
             poll_interval_sec=0.01,
             health_timeout_sec=0.5,
@@ -471,7 +490,7 @@ def test_runtime_stop_invokes_torchserve_stop(tmp_path: Path) -> None:
         rt.stop()
 
     assert any(
-        "--stop" in call.args[0] and "torchserve" in call.args[0][0]
+        "--stop" in call.args[0] and call.args[0][0] == str(bin_path)
         for call in run_mock.call_args_list
     )
 
@@ -488,7 +507,7 @@ def _ok_response():
 
 Run:
 ```bash
-pytest tests/test_torchserve_runtime.py::test_runtime_start_spawns_subprocess_and_polls_health -v
+/usr/bin/python3 -m pytest tests/test_torchserve_runtime.py::test_runtime_start_spawns_subprocess_and_polls_health -v
 ```
 Expected: `ImportError: cannot import name 'TorchServeRuntime'`.
 
@@ -515,6 +534,7 @@ class TorchServeRuntime:
         model_store: Path,
         config_path: Path,
         models: List[str],
+        torchserve_bin: Path,
         health_url: str = "http://127.0.0.1:8080/ping",
         poll_interval_sec: float = 1.0,
         health_timeout_sec: float = 30.0,
@@ -522,20 +542,21 @@ class TorchServeRuntime:
         self._model_store = Path(model_store)
         self._config_path = Path(config_path)
         self._models = list(models)
+        self._torchserve_bin = Path(torchserve_bin)
         self._health_url = health_url
         self._poll_interval_sec = poll_interval_sec
         self._health_timeout_sec = health_timeout_sec
         self._proc: Optional[subprocess.Popen] = None
 
     def start(self) -> None:
-        env = check_environment()
-        if not env.ok:
+        if not Path(self._torchserve_bin).is_file():
             raise TorchServeNotReady(
-                f"missing executables: {env.missing}. install: {env.install_hint}"
+                f"torchserve binary not found at {self._torchserve_bin}. "
+                f"Override with STICKERBOOK_TORCHSERVE_BIN env var."
             )
 
         cmd = [
-            "torchserve",
+            str(self._torchserve_bin),
             "--start",
             "--model-store", str(self._model_store),
             "--ts-config", str(self._config_path),
@@ -564,7 +585,7 @@ class TorchServeRuntime:
         )
 
     def stop(self) -> None:
-        subprocess.run(["torchserve", "--stop"], check=False)
+        subprocess.run([str(self._torchserve_bin), "--stop"], check=False)
         self._proc = None
 ```
 
@@ -572,7 +593,7 @@ class TorchServeRuntime:
 
 Run:
 ```bash
-pytest tests/test_torchserve_runtime.py -v
+/usr/bin/python3 -m pytest tests/test_torchserve_runtime.py -v
 ```
 Expected: 6 passed.
 
@@ -593,7 +614,7 @@ git commit -m "feat(m9): add TorchServeRuntime with health-polling lifecycle (Ta
 
 - [ ] **Step 1: Write failing test for composite**
 
-Create `/home/ingon/AR_book/stickerbook/tests/test_animated_drawings_runner.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/tests/test_animated_drawings_runner.py`:
 ```python
 import numpy as np
 
@@ -639,13 +660,13 @@ def test_composite_accepts_bgra_float_and_returns_uint8() -> None:
 
 Run:
 ```bash
-pytest tests/test_animated_drawings_runner.py::test_composite_places_opaque_pixels_over_white -v
+/usr/bin/python3 -m pytest tests/test_animated_drawings_runner.py::test_composite_places_opaque_pixels_over_white -v
 ```
 Expected: `ModuleNotFoundError: No module named 'animate.animated_drawings_runner'`.
 
 - [ ] **Step 3: Implement `composite_on_white_bg`**
 
-Create `/home/ingon/AR_book/stickerbook/animate/animated_drawings_runner.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/animate/animated_drawings_runner.py`:
 ```python
 """Runs AnimatedDrawings image_to_animation.py and parses the result."""
 from __future__ import annotations
@@ -672,7 +693,7 @@ def composite_on_white_bg(texture_bgra: np.ndarray) -> np.ndarray:
 
 Run:
 ```bash
-pytest tests/test_animated_drawings_runner.py -v
+/usr/bin/python3 -m pytest tests/test_animated_drawings_runner.py -v
 ```
 Expected: 3 passed.
 
@@ -732,6 +753,7 @@ def test_run_returns_success_when_video_and_cfg_produced(tmp_path: Path) -> None
             motion="dab",
             ad_repo_path=ad_repo,
             work_dir=work_dir,
+            ad_python=Path("/fake/python"),
             timeout_sec=5.0,
         )
 
@@ -758,7 +780,7 @@ def test_run_returns_failure_when_subprocess_nonzero_exit(tmp_path: Path) -> Non
     with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
         result = run_animated_drawings(
             texture_bgra=tex, motion="dab", ad_repo_path=ad_repo,
-            work_dir=work_dir, timeout_sec=5.0,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=5.0,
         )
 
     assert result.success is False
@@ -809,7 +831,7 @@ def test_run_writes_input_png_and_passes_path_to_subprocess(tmp_path: Path) -> N
     with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
         run_animated_drawings(
             texture_bgra=tex, motion="dab", ad_repo_path=ad_repo,
-            work_dir=work_dir, timeout_sec=5.0,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=5.0,
         )
 
     input_png_path = work_dir / "input.png"
@@ -823,7 +845,7 @@ def test_run_writes_input_png_and_passes_path_to_subprocess(tmp_path: Path) -> N
 
 Run:
 ```bash
-pytest tests/test_animated_drawings_runner.py -v -k "test_run_"
+/usr/bin/python3 -m pytest tests/test_animated_drawings_runner.py -v -k "test_run_"
 ```
 Expected: ImportErrors for `AnimationResult`, `run_animated_drawings`.
 
@@ -854,6 +876,7 @@ def run_animated_drawings(
     motion: str,
     ad_repo_path: Path,
     work_dir: Path,
+    ad_python: Path,
     timeout_sec: float = 30.0,
 ) -> AnimationResult:
     work_dir = Path(work_dir)
@@ -866,7 +889,7 @@ def run_animated_drawings(
     script = Path(ad_repo_path) / "examples" / "image_to_animation.py"
     out_dir = work_dir / "out"
 
-    cmd = ["python", str(script), str(input_png), str(out_dir)]
+    cmd = [str(ad_python), str(script), str(input_png), str(out_dir)]
     start = time.monotonic()
     try:
         result = subprocess.run(
@@ -917,7 +940,7 @@ Note: `motion` parameter is accepted for future extension (zombie/wave) but not 
 
 Run:
 ```bash
-pytest tests/test_animated_drawings_runner.py -v
+/usr/bin/python3 -m pytest tests/test_animated_drawings_runner.py -v
 ```
 Expected: all passed (previous composite tests + 4 new).
 
@@ -997,7 +1020,7 @@ def test_run_downgrades_success_to_failure_when_joints_bunched(tmp_path: Path) -
     with patch("animate.animated_drawings_runner.subprocess.run", side_effect=fake_run):
         result = run_animated_drawings(
             texture_bgra=tex, motion="dab", ad_repo_path=ad_repo,
-            work_dir=work_dir, timeout_sec=5.0,
+            work_dir=work_dir, ad_python=Path("/fake/python"), timeout_sec=5.0,
         )
 
     assert result.success is False
@@ -1008,7 +1031,7 @@ def test_run_downgrades_success_to_failure_when_joints_bunched(tmp_path: Path) -
 
 Run:
 ```bash
-pytest tests/test_animated_drawings_runner.py -v -k "joint_spread or bunched"
+/usr/bin/python3 -m pytest tests/test_animated_drawings_runner.py -v -k "joint_spread or bunched"
 ```
 Expected: ImportError for `joint_spread_ratio`, `JointSpreadError`.
 
@@ -1060,7 +1083,7 @@ Then modify the success branch in `run_animated_drawings` (just before `return A
 
 Run:
 ```bash
-pytest tests/test_animated_drawings_runner.py -v
+/usr/bin/python3 -m pytest tests/test_animated_drawings_runner.py -v
 ```
 Expected: all passed.
 
@@ -1081,7 +1104,7 @@ git commit -m "feat(m9): reject bunched-joint AD outputs (R13) (Task 7)"
 
 - [ ] **Step 1: Write failing tests**
 
-Create `/home/ingon/AR_book/stickerbook/tests/test_animation_worker.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/tests/test_animation_worker.py`:
 ```python
 import time
 from pathlib import Path
@@ -1092,14 +1115,14 @@ from animate.animated_drawings_runner import AnimationResult
 from animate.animation_worker import AnimationWorker
 
 
-def _stub_runner_success(tex, motion, ad_repo_path, work_dir, timeout_sec):
+def _stub_runner_success(tex, motion, ad_repo_path, work_dir, ad_python, timeout_sec):
     return AnimationResult(
         success=True, video_path=Path("/dev/null"),
         char_cfg_path=None, duration_sec=0.01, error=None,
     )
 
 
-def _stub_runner_raises(tex, motion, ad_repo_path, work_dir, timeout_sec):
+def _stub_runner_raises(tex, motion, ad_repo_path, work_dir, ad_python, timeout_sec):
     raise RuntimeError("boom")
 
 
@@ -1108,6 +1131,7 @@ def test_submit_returns_future_resolving_to_animation_result() -> None:
         runner=_stub_runner_success,
         ad_repo_path=Path("/tmp"),
         work_dir_base=Path("/tmp/wdir"),
+        ad_python=Path("/fake/python"),
     )
     try:
         tex = np.zeros((4, 4, 4), dtype=np.uint8)
@@ -1124,7 +1148,7 @@ def test_submit_processes_jobs_sequentially_not_in_parallel() -> None:
     started: list = []
     finished: list = []
 
-    def slow_runner(tex, motion, ad_repo_path, work_dir, timeout_sec):
+    def slow_runner(tex, motion, ad_repo_path, work_dir, ad_python, timeout_sec):
         started.append(time.monotonic())
         time.sleep(0.05)
         finished.append(time.monotonic())
@@ -1137,6 +1161,7 @@ def test_submit_processes_jobs_sequentially_not_in_parallel() -> None:
         runner=slow_runner,
         ad_repo_path=Path("/tmp"),
         work_dir_base=Path("/tmp/wdir"),
+        ad_python=Path("/fake/python"),
     )
     try:
         tex = np.zeros((4, 4, 4), dtype=np.uint8)
@@ -1156,7 +1181,7 @@ def test_submit_processes_jobs_sequentially_not_in_parallel() -> None:
 def test_worker_survives_runner_exception_and_keeps_processing_next() -> None:
     attempts = {"count": 0}
 
-    def flaky(tex, motion, ad_repo_path, work_dir, timeout_sec):
+    def flaky(tex, motion, ad_repo_path, work_dir, ad_python, timeout_sec):
         attempts["count"] += 1
         if attempts["count"] == 1:
             raise RuntimeError("first one fails")
@@ -1169,6 +1194,7 @@ def test_worker_survives_runner_exception_and_keeps_processing_next() -> None:
         runner=flaky,
         ad_repo_path=Path("/tmp"),
         work_dir_base=Path("/tmp/wdir"),
+        ad_python=Path("/fake/python"),
     )
     try:
         tex = np.zeros((4, 4, 4), dtype=np.uint8)
@@ -1187,13 +1213,13 @@ def test_worker_survives_runner_exception_and_keeps_processing_next() -> None:
 
 Run:
 ```bash
-pytest tests/test_animation_worker.py -v
+/usr/bin/python3 -m pytest tests/test_animation_worker.py -v
 ```
 Expected: `ModuleNotFoundError: No module named 'animate.animation_worker'`.
 
 - [ ] **Step 3: Implement `AnimationWorker`**
 
-Create `/home/ingon/AR_book/stickerbook/animate/animation_worker.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/animate/animation_worker.py`:
 ```python
 """Single-worker queue for AnimatedDrawings jobs."""
 from __future__ import annotations
@@ -1208,7 +1234,7 @@ import numpy as np
 from animate.animated_drawings_runner import AnimationResult
 
 
-RunnerFn = Callable[[np.ndarray, str, Path, Path, float], AnimationResult]
+RunnerFn = Callable[[np.ndarray, str, Path, Path, Path, float], AnimationResult]
 
 
 class AnimationWorker:
@@ -1217,12 +1243,14 @@ class AnimationWorker:
         runner: RunnerFn,
         ad_repo_path: Path,
         work_dir_base: Path,
+        ad_python: Path,
         motion: str = "dab",
         timeout_sec: float = 30.0,
     ) -> None:
         self._runner = runner
         self._ad_repo_path = Path(ad_repo_path)
         self._work_dir_base = Path(work_dir_base)
+        self._ad_python = Path(ad_python)
         self._motion = motion
         self._timeout_sec = timeout_sec
         self._executor = ThreadPoolExecutor(max_workers=1)
@@ -1235,6 +1263,7 @@ class AnimationWorker:
             self._motion,
             self._ad_repo_path,
             work_dir,
+            self._ad_python,
             self._timeout_sec,
         )
 
@@ -1246,7 +1275,7 @@ class AnimationWorker:
 
 Run:
 ```bash
-pytest tests/test_animation_worker.py -v
+/usr/bin/python3 -m pytest tests/test_animation_worker.py -v
 ```
 Expected: 3 passed.
 
@@ -1269,7 +1298,7 @@ git commit -m "feat(m9): single-worker animation queue (Task 8)"
 
 - [ ] **Step 1: Write failing test for AnimationState enum and extended AnchoredSticker**
 
-Create `/home/ingon/AR_book/stickerbook/tests/test_anchored_sticker_animation.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/tests/test_anchored_sticker_animation.py`:
 ```python
 from pathlib import Path
 
@@ -1303,13 +1332,13 @@ def test_animation_state_enum_has_expected_members() -> None:
 
 Run:
 ```bash
-pytest tests/test_anchored_sticker_animation.py -v
+/usr/bin/python3 -m pytest tests/test_anchored_sticker_animation.py -v
 ```
 Expected: `ImportError: cannot import name 'AnimationState' from 'app'`.
 
 - [ ] **Step 3: Add enum + fields to `app.py`**
 
-In `/home/ingon/AR_book/stickerbook/app.py`, add imports near top:
+In `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/app.py`, add imports near top:
 ```python
 from typing import Optional
 ```
@@ -1339,7 +1368,7 @@ class AnchoredSticker:
 
 Run:
 ```bash
-pytest tests/test_anchored_sticker_animation.py -v
+/usr/bin/python3 -m pytest tests/test_anchored_sticker_animation.py -v
 ```
 Expected: 2 passed.
 
@@ -1360,7 +1389,7 @@ git commit -m "feat(m9): AnimationState enum + AnchoredSticker fields (Task 9)"
 
 - [ ] **Step 1: Write failing tests**
 
-Create `/home/ingon/AR_book/stickerbook/tests/test_animated_sticker_renderer.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/tests/test_animated_sticker_renderer.py`:
 ```python
 from pathlib import Path
 
@@ -1436,13 +1465,13 @@ def test_renderer_applies_chroma_key_to_black_background(sample_video: Path) -> 
 
 Run:
 ```bash
-pytest tests/test_animated_sticker_renderer.py -v
+/usr/bin/python3 -m pytest tests/test_animated_sticker_renderer.py -v
 ```
 Expected: `ModuleNotFoundError: No module named 'render.animated_sticker_renderer'`.
 
 - [ ] **Step 3: Implement renderer**
 
-Create `/home/ingon/AR_book/stickerbook/render/animated_sticker_renderer.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/render/animated_sticker_renderer.py`:
 ```python
 """Plays back an AnimatedDrawings video as a BGRA frame source for billboard rendering."""
 from __future__ import annotations
@@ -1495,7 +1524,7 @@ Note: If M9.1 concludes that AD outputs have a WHITE background instead of BLACK
 
 Run:
 ```bash
-pytest tests/test_animated_sticker_renderer.py -v
+/usr/bin/python3 -m pytest tests/test_animated_sticker_renderer.py -v
 ```
 Expected: 3 passed.
 
@@ -1518,7 +1547,7 @@ git commit -m "feat(m9): AnimatedStickerRenderer with looping video frame source
 
 - [ ] **Step 1: Write failing test**
 
-Append to `/home/ingon/AR_book/stickerbook/tests/test_tilt_renderer.py`:
+Append to `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/tests/test_tilt_renderer.py`:
 ```python
 from render.tilt_renderer import render_bgra_as_billboard
 
@@ -1558,7 +1587,7 @@ def test_render_bgra_as_billboard_degenerate_homography_no_op() -> None:
 
 Run:
 ```bash
-pytest tests/test_tilt_renderer.py::test_render_bgra_as_billboard_modifies_frame_with_identity_h -v
+/usr/bin/python3 -m pytest tests/test_tilt_renderer.py::test_render_bgra_as_billboard_modifies_frame_with_identity_h -v
 ```
 Expected: `ImportError: cannot import name 'render_bgra_as_billboard'`.
 
@@ -1610,7 +1639,7 @@ def render_sticker_as_billboard(
 
 Run:
 ```bash
-pytest tests/test_tilt_renderer.py -v
+/usr/bin/python3 -m pytest tests/test_tilt_renderer.py -v
 ```
 Expected: all previous tests + 2 new tests pass (13 total if previously 11).
 
@@ -1631,7 +1660,7 @@ git commit -m "refactor(m9): extract render_bgra_as_billboard from sticker varia
 
 - [ ] **Step 1: Write failing test**
 
-Create `/home/ingon/AR_book/stickerbook/tests/test_spinner_overlay.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/tests/test_spinner_overlay.py`:
 ```python
 import numpy as np
 
@@ -1669,13 +1698,13 @@ def test_draw_spinner_does_not_raise_when_center_near_frame_edge() -> None:
 
 Run:
 ```bash
-pytest tests/test_spinner_overlay.py -v
+/usr/bin/python3 -m pytest tests/test_spinner_overlay.py -v
 ```
 Expected: `ModuleNotFoundError: No module named 'render.spinner_overlay'`.
 
 - [ ] **Step 3: Implement spinner**
 
-Create `/home/ingon/AR_book/stickerbook/render/spinner_overlay.py`:
+Create `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/render/spinner_overlay.py`:
 ```python
 """Rotating-dots spinner drawn over a sticker region while AD is processing."""
 from __future__ import annotations
@@ -1711,7 +1740,7 @@ def draw_spinner(
 
 Run:
 ```bash
-pytest tests/test_spinner_overlay.py -v
+/usr/bin/python3 -m pytest tests/test_spinner_overlay.py -v
 ```
 Expected: 3 passed.
 
@@ -1735,7 +1764,7 @@ git commit -m "feat(m9): spinner overlay for PREPARING state (Task 12)"
 
 - [ ] **Step 1: Add config paths**
 
-Modify `/home/ingon/AR_book/stickerbook/config.py` — append:
+Modify `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/config.py` — append:
 ```python
 AD_REPO_PATH = Path(os.environ.get(
     "STICKERBOOK_AD_REPO",
@@ -1848,13 +1877,13 @@ def test_poll_animation_transitions_to_failed_on_error() -> None:
 
 Run:
 ```bash
-pytest tests/test_app.py::test_on_click_submits_to_animation_worker_and_sets_preparing -v
+/usr/bin/python3 -m pytest tests/test_app.py::test_on_click_submits_to_animation_worker_and_sets_preparing -v
 ```
 Expected: AttributeError / ImportError for `_animation_worker`, `_promote_to_live`, `_poll_animations`.
 
 - [ ] **Step 4: Wire up `App`**
 
-In `/home/ingon/AR_book/stickerbook/app.py`:
+In `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/app.py`:
 
 a) Add imports near top:
 ```python
@@ -1964,10 +1993,12 @@ Update the test in Step 2 to reflect this signature (pass anchor explicitly, not
 e) Modify `run` to instantiate TorchServeRuntime + AnimationWorker, call them in try/finally:
 ```python
         # after segmenter/executor setup
+        from config import TORCHSERVE_BIN, AD_PYTHON  # if not imported at top already
         self._torchserve = TorchServeRuntime(
             model_store=AD_REPO_PATH / "torchserve" / "model-store",
             config_path=TORCHSERVE_CONFIG_PATH,
             models=TORCHSERVE_MODELS,
+            torchserve_bin=TORCHSERVE_BIN,
         )
         try:
             self._torchserve.start()
@@ -1975,6 +2006,7 @@ e) Modify `run` to instantiate TorchServeRuntime + AnimationWorker, call them in
                 runner=run_animated_drawings,
                 ad_repo_path=AD_REPO_PATH,
                 work_dir_base=ANIMATION_WORK_DIR,
+                ad_python=AD_PYTHON,
             )
         except Exception as e:
             print(f"[app] WARNING: animation unavailable ({e}); stickers will remain STATIC")
@@ -2025,7 +2057,7 @@ h) In `finally`, append cleanup:
 
 Run:
 ```bash
-pytest tests/test_app.py -v -k "animation or preparing or animated or failed"
+/usr/bin/python3 -m pytest tests/test_app.py -v -k "animation or preparing or animated or failed"
 ```
 Expected: 3 new tests pass. (Adjust test `_promote_to_live` call to pass anchor as per the signature revision.)
 
@@ -2033,7 +2065,7 @@ Expected: 3 new tests pass. (Adjust test `_promote_to_live` call to pass anchor 
 
 Run:
 ```bash
-pytest -v
+/usr/bin/python3 -m pytest -v
 ```
 Expected: all passing. If any prior test_app tests fail due to `_promote_to_live` signature change, update them in the same commit.
 
@@ -2100,7 +2132,7 @@ def test_perf_report_includes_animation_metrics_when_present() -> None:
 
 Run:
 ```bash
-pytest tests/test_app.py::test_perf_report_includes_animation_metrics_when_present -v
+/usr/bin/python3 -m pytest tests/test_app.py::test_perf_report_includes_animation_metrics_when_present -v
 ```
 Expected: pass (since `_samples` keys auto-appear).
 
@@ -2108,7 +2140,7 @@ Expected: pass (since `_samples` keys auto-appear).
 
 Read current README first:
 ```bash
-cat /home/ingon/AR_book/stickerbook/README.md | head -80
+cat /home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/README.md | head -80
 ```
 
 Then:
@@ -2142,7 +2174,7 @@ Then:
 
 - [ ] **Step 5: Update DESIGN.md status**
 
-In `/home/ingon/AR_book/stickerbook/docs/DESIGN.md`, mark M9 sub-milestones as they complete:
+In `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/docs/DESIGN.md`, mark M9 sub-milestones as they complete:
 ```
 | M9.1 | AD 출력 포맷 검증 | ... | ✅ |
 | M9.2 | TorchServeRuntime + 네이티브 설치 | ... | ✅ |
@@ -2154,7 +2186,7 @@ In `/home/ingon/AR_book/stickerbook/docs/DESIGN.md`, mark M9 sub-milestones as t
 
 Run:
 ```bash
-pytest -v
+/usr/bin/python3 -m pytest -v
 ```
 Expected: all passing.
 
@@ -2177,19 +2209,20 @@ git commit -m "docs(m9): perf metrics + README native-setup guide + M9 status"
 
 Run:
 ```bash
-cd /home/ingon/AR_book/stickerbook
+cd /home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook
 java -version 2>&1 | head -1
-which torchserve
+ls /home/ingon/miniconda3/envs/animated_drawings/bin/torchserve
+ls /home/ingon/miniconda3/envs/animated_drawings/bin/python
 ls ~/AR_book/AnimatedDrawings/torchserve/model-store/*.mar
 cat /tmp/ts_config.properties 2>/dev/null || echo "default_workers_per_model=1" > /tmp/ts_config.properties
 ```
-Expected: java ≥ 11, torchserve found, both .mar files present, config exists.
+Expected: java ≥ 11, AD env torchserve/python found, both .mar files present, config exists.
 
 - [ ] **Step 2: Run app in integration mode**
 
 Run:
 ```bash
-python main.py --sam-weights models/mobile_sam.pt
+/usr/bin/python3 main.py --sam-weights models/mobile_sam.pt
 ```
 
 Observe startup logs:
@@ -2210,7 +2243,7 @@ Perform manually:
 
 - [ ] **Step 4: Record findings**
 
-Create or append to `/home/ingon/AR_book/stickerbook/docs/M9_E2E_VERIFICATION.md`:
+Create or append to `/home/ingon/AR_book/drawing-to-2.5d-repo/stickerbook/docs/M9_E2E_VERIFICATION.md`:
 ```markdown
 # M9 E2E Verification — <date>
 
