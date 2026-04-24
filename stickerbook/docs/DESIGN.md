@@ -408,8 +408,10 @@ pyyaml>=6.0
 | M5.5 | 재획득 루프 (5프레임 주기 ORB 재시도) | 종이 다시 들이면 딱지 복귀 | ✅ (DESIGN 원안 누락 버그 수정) |
 | M6 | 다중 딱지 + 리셋/저장 + `export` | E2E 체크리스트 통과 | ✅ |
 | M6.1 | `raw`/`display` 프레임 분리 (R7 수정) | 저장된 texture.png 에 contour 박스 없음 | ✅ |
-| M7 | 성능 측정 + 리스크 문서화 + README 정리 | Stage 2 포팅 준비 완료 | 🟡 진행중 |
-| M7.5 | AnimatedDrawings 로컬 라운드트립 검증 | `texture.png` 입력으로 애니메이션 비디오 생성 | ⏳ 예정 |
+| M7 | 성능 측정 + 리스크 문서화 + README 정리 | Stage 2 포팅 준비 완료 | ✅ |
+| M7.5 | AnimatedDrawings 로컬 라운드트립 검증 | `texture.png` 입력으로 애니메이션 비디오 생성 | ✅ (TorchServe via Docker, dab GIF 생성 확인) |
+| M8 / M8.1 | Popup billboard 렌더 (정지 딱지) | 종이 기울여도 캐릭터 벌떡 서있음 | ✅ |
+| M9 | AD 라이브 통합 (춤추는 딱지) | 클릭 → 7–12초 → 종이 위에서 dab 춤 | ⏳ 예정 |
 
 각 마일스톤은 독립 commit / PR 단위. M1~M3 가 **검증의 핵심** (여기서 "잘못된 방향" 이었는지 일찍 알 수 있음).
 
@@ -437,3 +439,228 @@ pyyaml>=6.0
 - `export/animated_drawings.py` 는 M6 에서 시작해도 괜찮은지, 아니면 M3 부터 바로 만들지
 - 상태머신에서 "LIVE + EXTRACTING 중첩" 을 허용할지 (UX 실험 필요)
 - 마커 기반 백업 구현을 미래 옵션으로 남겨둘지 (homography 실패 시 사용자가 ArUco 스티커를 붙일 수 있는 fallback)
+
+---
+
+## M9 — AnimatedDrawings 라이브 통합 (춤추는 딱지)
+
+> 2026-04-24 브레인스토밍 결정. M7.5 의 수동 검증을 라이브 앱에 통합한다.
+
+### 결정 사항 (Q/A 요약)
+
+| 질문 | 결정 |
+|---|---|
+| 트리거 | 클릭 시 자동으로 AD 파이프라인 시작, 7–12초 스피너 후 춤 |
+| AD 호출 | `subprocess.run(["python", "image_to_animation.py", ...])` shell out |
+| 런타임 | Docker 없이 **TorchServe 네이티브** (pip + openjdk-17) |
+| 실패 처리 | 조용히 정지 딱지 유지, 로그에만 기록 (토스트 없음) |
+| 애니메이션 | **dab 고정** (zombie/wave 등은 후속) |
+| 큐잉 | 단일 워커 `ThreadPoolExecutor(max_workers=1)` — 다중 클릭 순차 처리 |
+
+### 상태머신 확장
+
+```
+SCAN → click → SEGMENTING → LIVE (정지 딱지)
+                                ↓ (자동, 백그라운드)
+                          Sticker.animation_state:
+                              STATIC → PREPARING → ANIMATED  (성공 시)
+                                              ↘ FAILED        (실패 시, STATIC 유지)
+```
+
+- LIVE 는 앱 전역 상태로 유지. ANIMATING 은 **Sticker 단위 속성**.
+- 딱지 3개가 각자 다른 animation_state 를 가질 수 있음.
+- 정지 딱지는 M8.1 billboard 그대로 동작. 애니메이션 성공한 딱지만 AnimatedStickerRenderer 로 전환.
+
+### Sticker 데이터 확장
+
+```python
+class AnimationState(Enum):
+    STATIC      # 처음 생성
+    PREPARING   # AD 작업 진행 중
+    ANIMATED    # video.mp4 준비됨, 재생 중
+    FAILED      # AD 실패, STATIC 유지
+
+@dataclass
+class Sticker:
+    # 기존 필드 ...
+    animation_state: AnimationState = AnimationState.STATIC
+    animation_video_path: Optional[Path] = None
+    animation_frame_index: int = 0
+    animation_started_at: Optional[float] = None
+```
+
+### 새 모듈
+
+```
+stickerbook/
+├── animate/                              # ← 신규
+│   ├── __init__.py
+│   ├── torchserve_runtime.py             # TorchServe 네이티브 기동/정지
+│   ├── animated_drawings_runner.py       # AD 스크립트 shell out + 결과 파싱
+│   └── animation_worker.py               # 단일 워커 큐 (Future 반환)
+├── render/
+│   ├── animated_sticker_renderer.py      # ← 신규: video 프레임 재생 + billboard warp
+│   ├── spinner_overlay.py                # ← 신규: PREPARING 시각화
+│   └── ...existing files
+```
+
+### 실행 흐름 (클릭 한 번)
+
+```
+click (x, y)
+   │
+   ▼
+Segmenter (1–2초)                 ──▶ StickerAsset + HomographyAnchor
+   │
+   ▼ (자동 이어서)
+AnimationWorker.submit(sticker)   ──▶ Future[AnimationResult]
+   │                                       │
+   │                                       ▼
+   │      ┌──────────────────────────────────────────────────────┐
+   │      │ 1. texture_bgra → 흰 배경 합성 → /tmp/<uuid>/input.png │
+   │      │ 2. subprocess.run([python, image_to_animation.py,     │
+   │      │    input.png, out_dir, motion_cfg=dab])               │
+   │      │ 3. out_dir/video.mp4 존재? → success 판정             │
+   │      └──────────────────────────────────────────────────────┘
+   │
+   ▼
+sticker.animation_state = PREPARING  (spinner overlay 표시)
+   │
+   ▼ Future.done()
+   ├── success: animation_state = ANIMATED, video_path 설정
+   └── failure: animation_state = FAILED (정지 딱지 유지)
+   │
+   ▼ (LIVE 합성)
+compositor → 각 sticker 에 대해:
+   - STATIC / FAILED: 기존 billboard
+   - PREPARING: 정지 billboard + spinner
+   - ANIMATED: AnimatedStickerRenderer.render_on(frame, sticker, anchor)
+```
+
+### TorchServeRuntime 생명주기
+
+`app.py` 의 `__enter__` / `__exit__` 에서 관리:
+
+```python
+self._torchserve = TorchServeRuntime(
+    models_dir="~/AR_book/AnimatedDrawings/torchserve/model-store",
+    config_path="/tmp/ts_config.properties",   # M7.5 검증: default_workers_per_model=1
+)
+self._torchserve.start()                        # health check 통과까지 blocking (~5초)
+# ... 앱 실행 ...
+self._torchserve.stop()                         # torchserve --stop
+```
+
+첫 실행 시 `java -version` + `which torchserve` 를 사전 체크. 실패 시 친절한 에러:
+```
+[TorchServeRuntime] java 17+ not found. Install: sudo apt install openjdk-17-jre-headless
+[TorchServeRuntime] torchserve not found. Install: pip install torchserve torch-model-archiver
+```
+
+### 데이터 계약
+
+```python
+# animate/animated_drawings_runner.py
+@dataclass
+class AnimationResult:
+    success: bool
+    video_path: Optional[Path]      # video.mp4 (or PNG sequence dir — M9.1 에서 결정)
+    char_cfg_path: Optional[Path]   # AD char_cfg.yaml (디버그/Stage 2 참고)
+    duration_sec: float              # AD 호출 실측 시간 (perf tracker)
+    error: Optional[str]
+
+def run_animated_drawings(
+    texture_bgra: np.ndarray,       # StickerAsset.texture_bgra
+    motion: str = "dab",
+    ad_repo_path: Path,
+    work_dir: Path,                  # /tmp/stickerbook_ad/<uuid>/
+    timeout_sec: float = 30.0,
+) -> AnimationResult: ...
+```
+
+### 프레임 재생
+
+`render/animated_sticker_renderer.py`:
+
+```python
+class AnimatedStickerRenderer:
+    def __init__(self, video_path: Path):
+        self._cap = cv2.VideoCapture(str(video_path))
+        self._frame_count = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    def next_frame_bgra(self) -> np.ndarray:
+        ok, frame_bgr = self._cap.read()
+        if not ok:
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame_bgr = self._cap.read()
+        return self._bgr_to_bgra_with_chroma_key(frame_bgr)
+
+    def render_on(self, frame, sticker, anchor_state):
+        # 기존 billboard_corners_2d + warpPerspective 재사용
+        ...
+```
+
+### 마일스톤
+
+| M | 내용 | 검증 기준 | 예상 |
+|---|---|---|---|
+| M9.1 | **출력 포맷 검증** (R8 해소): AD CLI 수동 → video.mp4 vs gif / 알파 채널 / 프레임 추출 방법 결정 | 재생 가능한 프레임 소스 확정 | 0.5일 |
+| M9.2 | **TorchServeRuntime** + 네이티브 설치: `animate/torchserve_runtime.py` + Java 체크 + health check | 앱 기동/종료 시 TorchServe 자동. Docker 없이 M7.5 동일 결과 | 1일 |
+| M9.3 | **AnimatedDrawingsRunner**: StickerAsset → AnimationResult (흰배경 합성, subprocess, 결과 파싱) | 테스트 입력 → video 생성. 여자아이류 실패 케이스 graceful | 1일 |
+| M9.4 | **AnimationWorker** 단일 큐 + `Sticker.animation_state` 통합 | 3번 클릭 → 순차 처리, 큐 상태 로그 | 0.5일 |
+| M9.5 | **AnimatedStickerRenderer** + compositor 통합 + SpinnerOverlay | 클릭 → 정지 딱지 → 스피너 → 춤. 카메라 이동해도 billboard 앵커 유지 | 1일 |
+| M9.6 | E2E + perf report (`animation_success_rate`, `animation_latency_p50/p95`) + README Docker 언급 제거 | 완료 기준 충족 | 0.5일 |
+
+**총 4.5일 추정**. M9.1 이 가장 큰 리스크 — 결과에 따라 M9.5 프레임 읽기 전략 변경 가능.
+
+### 테스트 전략 (TDD 유지)
+
+```
+tests/
+├── test_torchserve_runtime.py           (integration, @slow)
+│     test_start_stop_lifecycle
+│     test_health_check_detects_not_ready
+│     test_raises_helpful_error_if_java_missing
+├── test_animated_drawings_runner.py     (integration, @slow)
+│     test_runs_on_valid_human_sticker_returns_mp4
+│     test_returns_failed_result_on_bunched_joints
+│     test_handles_subprocess_nonzero_exit
+├── test_animation_worker.py             (unit)
+│     test_single_worker_processes_jobs_sequentially
+│     test_future_resolves_with_animation_result
+│     test_worker_survives_job_exception
+├── test_animated_sticker_renderer.py    (unit)
+│     test_frame_loops_back_to_zero_at_end
+│     test_render_on_uses_current_anchor_homography
+│     test_bgra_conversion_preserves_alpha_if_available
+└── test_app_animation_state_transition.py (unit)
+      test_click_transitions_sticker_to_preparing
+      test_animation_success_transitions_to_animated
+      test_animation_failure_keeps_sticker_static
+```
+
+### 리스크 추가
+
+| # | 리스크 | 영향 | 대응 |
+|---|---|---|---|
+| R8 | AD 출력이 MP4 면 알파 채널 없음 → 배경 검은 사각형 | 렌더 깨짐 | M9.1 에서 검증. PNG 시퀀스 추출로 우회 가능 |
+| R9 | TorchServe 네이티브 설치가 conda/venv 혼재 환경에서 꼬임 | 설치 실패 | 명시적 가이드 + health check 에서 친절한 에러 |
+| R10 | Java 17 가 WSL 에 없음 | 기동 실패 | `TorchServeRuntime.start()` 가 `java -version` 먼저 체크 |
+| R11 | 7–12초 이상 걸림 (저사양 노트북) | 대기 체감 악화 | 30초 timeout 초과 시 FAILED. 스피너에 경과 시간 |
+| R12 | 딱지 여러 개 큐잉 시 마지막은 30초+ 대기 | UX 저하 | 스피너에 "N 번째 대기 중" 표시 |
+| R13 | joint 가 뭉치면 AD 는 "성공" 반환하지만 애니메이션 이상함 | 품질 저하 | M9.3 에서 joint spread sanity check → 미달 시 FAILED |
+
+### Stage 2 (갤탭) 호환성
+
+- **제거 대상 (갤탭 못 감)**: TorchServe, Java, subprocess, Docker
+- **유지 대상**: `AnimationResult`, `AnimationWorker` 인터페이스, AnimatedStickerRenderer (프레임 소스만 교체)
+- 포팅 시 내부 구현만 ONNX + onnxruntime-mobile 로 교체, 상위 계약은 유지
+
+### 비포함 (명시)
+
+- zombie/wave/run 등 다른 모션
+- 사용자가 애니메이션 선택하는 UI
+- 애니메이션 속도 조절
+- 춤추는 딱지의 MP4 저장 (현재 S 키는 정지 텍스처만 저장)
+- 실시간 포즈 재인식 (한 번 검출된 스켈레톤 고정)
+
