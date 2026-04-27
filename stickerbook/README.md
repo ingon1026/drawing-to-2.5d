@@ -127,7 +127,7 @@ Stage 1 완료. 세부는 [`docs/DESIGN.md`](docs/DESIGN.md#마일스톤) 참조
 python3 -m pytest tests/
 ```
 
-현재 **44 tests passing** (M1~M6.1 커버리지).
+현재 **97 tests passing** (M1~M9 커버리지).
 
 ---
 

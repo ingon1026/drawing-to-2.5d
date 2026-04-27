@@ -68,6 +68,20 @@ class AnchoredSticker:
     animation_started_at: Optional[float] = None
     animation_future: Optional["Future"] = None  # set while PREPARING
     animation_work_dir: Optional[Path] = None  # for I2 cleanup
+    popup_lift_ratio: float = 1.0  # set at creation by _promote_to_live
+
+
+def _choose_popup_lift_ratio(source_region: Tuple[int, int, int, int]) -> float:
+    """Choose popup_lift_ratio so the billboard's top edge stays >= 0 in image y.
+
+    Returns 1.0 when there's full headroom (sy >= sh), reduces toward 0.0 as the
+    drawing approaches the top of the frame. Floor at 0.0 (billboard sits flat
+    at the source position, no popup).
+    """
+    sx, sy, sw, sh = source_region
+    if sh <= 0:
+        return 1.0
+    return float(min(1.0, max(0.0, sy / sh)))
 
 
 class _PerfTracker:
@@ -217,7 +231,11 @@ class App:
     def _promote_to_live(
         self, sticker_asset: StickerAsset, anchor: HomographyAnchor
     ) -> AnchoredSticker:
-        item = AnchoredSticker(sticker=sticker_asset, anchor=anchor)
+        item = AnchoredSticker(
+            sticker=sticker_asset,
+            anchor=anchor,
+            popup_lift_ratio=_choose_popup_lift_ratio(sticker_asset.source_region),
+        )
         if self._animation_worker is not None:
             item.animation_future = self._animation_worker.submit(sticker_asset.texture_bgra)
             item.animation_state = AnimationState.PREPARING
@@ -262,7 +280,16 @@ class App:
             self._segmenter = Segmenter(self._sam_weights)
             self._executor = ThreadPoolExecutor(max_workers=1)
             if not TORCHSERVE_CONFIG_PATH.exists():
-                TORCHSERVE_CONFIG_PATH.write_text("default_workers_per_model=1\n")
+                TORCHSERVE_CONFIG_PATH.write_text(
+                    "default_workers_per_model=1\n"
+                    "enable_metrics_api=false\n"
+                )
+            existing = TORCHSERVE_CONFIG_PATH.read_text() if TORCHSERVE_CONFIG_PATH.exists() else ""
+            if "enable_metrics_api=false" not in existing:
+                print(
+                    f"[app] hint: append 'enable_metrics_api=false' to "
+                    f"{TORCHSERVE_CONFIG_PATH} to silence nvgpu warnings"
+                )
             self._torchserve = TorchServeRuntime(
                 model_store=AD_REPO_PATH / "torchserve" / "model-store",
                 config_path=TORCHSERVE_CONFIG_PATH,
@@ -325,11 +352,22 @@ class App:
                                 texture_bgra=bgra,
                                 source_region=item.sticker.source_region,
                                 homography=state.homography,
+                                popup_lift_ratio=item.popup_lift_ratio,
                             )
                         else:
-                            render_sticker_as_billboard(display, item.sticker, state.homography)
+                            render_sticker_as_billboard(
+                                display,
+                                item.sticker,
+                                state.homography,
+                                popup_lift_ratio=item.popup_lift_ratio,
+                            )
                     else:
-                        render_sticker_as_billboard(display, item.sticker, state.homography)
+                        render_sticker_as_billboard(
+                            display,
+                            item.sticker,
+                            state.homography,
+                            popup_lift_ratio=item.popup_lift_ratio,
+                        )
                         if item.animation_state is AnimationState.PREPARING:
                             x, y, w, h = item.sticker.source_region
                             cx, cy = x + w // 2, y + h // 2

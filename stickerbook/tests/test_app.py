@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 
 from animate.animated_drawings_runner import AnimationResult
 from app import AnchoredSticker, App, AppAction, AnimationState, _PerfTracker
@@ -197,3 +198,45 @@ def test_perf_report_includes_animation_metrics_when_present() -> None:
     report = pt.report()
     assert "animation_success_sec" in report
     assert "animation_failure_sec" in report
+
+
+def test_choose_popup_lift_ratio_full_when_sy_at_least_sh() -> None:
+    from app import _choose_popup_lift_ratio
+    # sy=300, sh=200 -> max_ratio=1.5, capped to 1.0
+    assert _choose_popup_lift_ratio((100, 300, 200, 200)) == 1.0
+
+
+def test_choose_popup_lift_ratio_proportional_when_sy_less_than_sh() -> None:
+    from app import _choose_popup_lift_ratio
+    # sy=50, sh=200 -> ratio=0.25
+    assert _choose_popup_lift_ratio((100, 50, 200, 200)) == pytest.approx(0.25)
+
+
+def test_choose_popup_lift_ratio_zero_when_at_top_edge() -> None:
+    from app import _choose_popup_lift_ratio
+    # sy=0 -> ratio=0 (billboard sits flat at source)
+    assert _choose_popup_lift_ratio((100, 0, 200, 200)) == 0.0
+
+
+def test_promote_to_live_caps_popup_for_high_source_region() -> None:
+    app = App()
+    asset = MagicMock()
+    asset.source_region = (100, 30, 200, 250)  # sy=30, sh=250 -> ratio=0.12
+    asset.texture_bgra = np.zeros((250, 200, 4), dtype=np.uint8)
+    anchor = HomographyAnchor()
+
+    item = app._promote_to_live(asset, anchor)
+
+    assert item.popup_lift_ratio == pytest.approx(30.0 / 250.0)
+
+
+def test_promote_to_live_keeps_full_popup_for_centered_source_region() -> None:
+    app = App()
+    asset = MagicMock()
+    asset.source_region = (100, 400, 200, 200)  # sy=400, sh=200 -> ratio=1.0
+    asset.texture_bgra = np.zeros((200, 200, 4), dtype=np.uint8)
+    anchor = HomographyAnchor()
+
+    item = app._promote_to_live(asset, anchor)
+
+    assert item.popup_lift_ratio == 1.0
