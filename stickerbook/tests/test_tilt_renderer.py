@@ -155,3 +155,37 @@ def test_billboard_render_leaves_frame_unchanged_on_degenerate_homography() -> N
     render_sticker_as_billboard(frame, sticker, np.zeros((3, 3)), enable_shadow=False)
 
     assert np.array_equal(frame, before)
+
+
+from render.tilt_renderer import render_bgra_as_billboard
+
+
+def test_render_bgra_as_billboard_modifies_frame_with_identity_h() -> None:
+    frame = np.full((480, 640, 3), 200, dtype=np.uint8)
+    before = frame.copy()
+    tex_bgra = np.zeros((80, 80, 4), dtype=np.uint8)
+    tex_bgra[..., 2] = 255  # red
+    tex_bgra[..., 3] = 255  # opaque
+
+    render_bgra_as_billboard(
+        frame=frame,
+        texture_bgra=tex_bgra,
+        source_region=(250, 200, 80, 80),
+        homography=np.eye(3),
+        enable_shadow=False,
+    )
+    assert not np.array_equal(frame, before)
+
+
+def test_render_bgra_as_billboard_degenerate_homography_no_op() -> None:
+    frame = np.full((480, 640, 3), 200, dtype=np.uint8)
+    before = frame.copy()
+    tex_bgra = np.zeros((80, 80, 4), dtype=np.uint8)
+    tex_bgra[..., 3] = 255
+
+    render_bgra_as_billboard(
+        frame=frame, texture_bgra=tex_bgra,
+        source_region=(250, 200, 80, 80),
+        homography=np.zeros((3, 3)), enable_shadow=False,
+    )
+    assert np.array_equal(frame, before)

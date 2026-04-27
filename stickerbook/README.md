@@ -49,6 +49,33 @@ python3 main.py --camera 1
 
 > **WSL2 노트**: `/dev/video0` 이 Orbbec/Realsense 센서 장치로 오인되는 경우가 있어 `--camera 1` 이 실제 웹캠일 수 있음. 작동 안 하면 `--camera 0`, `--camera 2` 순으로 시도.
 
+### Setup — AnimatedDrawings animation (M9, optional)
+
+M9 adds dancing stickers via AnimatedDrawings. Requires TorchServe from the AD
+conda env (no Docker):
+
+```bash
+# 1. Install AnimatedDrawings into a conda env (or reuse existing one).
+#    stickerbook defaults to /home/ingon/miniconda3/envs/animated_drawings/.
+# 2. Ensure the .mar model files are present:
+ls ~/AR_book/AnimatedDrawings/torchserve/model-store/drawn_humanoid_*.mar
+#    If missing, download:
+# wget -P ~/AR_book/AnimatedDrawings/torchserve/model-store/ \
+#   https://github.com/facebookresearch/AnimatedDrawings/releases/download/v0.0.1/drawn_humanoid_detector.mar \
+#   https://github.com/facebookresearch/AnimatedDrawings/releases/download/v0.0.1/drawn_humanoid_pose_estimator.mar
+```
+
+stickerbook will spawn torchserve automatically on startup and shut it down on
+exit. If the binary is missing or health check fails, the app logs a warning
+and runs without animation (stickers remain static — M8.1 behavior).
+
+Environment overrides:
+- `STICKERBOOK_TORCHSERVE_BIN` — absolute path to torchserve
+- `STICKERBOOK_AD_PYTHON` — absolute path to AD's python
+- `STICKERBOOK_AD_REPO` — AnimatedDrawings repo path
+- `STICKERBOOK_AD_WORK_DIR` — intermediate output directory (default `/tmp/stickerbook_ad`)
+- `STICKERBOOK_TS_CONFIG` — TorchServe config file
+
 ### 4. 조작법
 
 | 입력 | 동작 |
@@ -86,8 +113,10 @@ Stage 1 완료. 세부는 [`docs/DESIGN.md`](docs/DESIGN.md#마일스톤) 참조
 | M5.5 재획득 루프 | ✅ |
 | M6 다중 딱지 + 리셋/저장 | ✅ |
 | M6.1 raw/display 프레임 분리 | ✅ |
-| M7 성능 측정 + 문서 정리 | 🟡 진행중 |
-| M7.5 AnimatedDrawings 라운드트립 | ⏳ 예정 |
+| M7 성능 측정 + 문서 정리 | ✅ |
+| M7.5 AnimatedDrawings 라운드트립 | ✅ |
+| M8 / M8.1 Popup billboard 렌더 | ✅ |
+| M9 라이브 AnimatedDrawings 통합 (춤추는 딱지) | ✅ |
 | Stage 2 (Android ARCore + ONNX) | ⏳ 별도 프로젝트 |
 
 ---
@@ -98,7 +127,7 @@ Stage 1 완료. 세부는 [`docs/DESIGN.md`](docs/DESIGN.md#마일스톤) 참조
 python3 -m pytest tests/
 ```
 
-현재 **44 tests passing** (M1~M6.1 커버리지).
+현재 **97 tests passing** (M1~M9 커버리지).
 
 ---
 
