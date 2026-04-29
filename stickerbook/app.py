@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
+import yaml
 
 from animate.animated_drawings_runner import AnimationResult, run_animated_drawings
 from animate.animation_worker import AnimationWorker
@@ -47,6 +49,7 @@ class AppAction(Enum):
     QUIT = auto()
     RESET = auto()
     SAVE = auto()
+    CAPTURE = auto()  # SPACE: send current frame to AD pipeline
 
 
 class AnimationState(Enum):
@@ -151,6 +154,8 @@ class App:
             return AppAction.RESET
         if masked in (ord("s"), ord("S")):
             return AppAction.SAVE
+        if masked == 32:  # SPACE
+            return AppAction.CAPTURE
         return None
 
     def _cleanup_work_dir(self, work_dir: Optional[Path]) -> None:
@@ -183,41 +188,101 @@ class App:
         print(f"[app] saved {len(self._anchored)} sticker(s) to {session_dir}")
 
     def _on_mouse(self, event: int, x: int, y: int, flags: int, param: object) -> None:
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self._on_click(x, y)
+        # Click input is disabled in the new "frame-whole" mode; SPACE replaces it.
+        return
 
-    def _on_click(self, x: int, y: int) -> None:
-        if self._current_frame is None or self._segmenter is None or self._executor is None:
+    def _on_space(self) -> None:
+        """SPACE: pipe the current camera frame as-is into AnimatedDrawings."""
+        if self._current_frame is None or self._executor is None:
+            return
+        if self._animation_worker is None:
+            print("[app] SPACE ignored: AD pipeline not available (TorchServe failed?)")
             return
         frame_copy = self._current_frame.copy()
-        future = self._executor.submit(self._segmenter.segment, frame_copy, (x, y))
+        future = self._executor.submit(self._run_ad_pipeline, frame_copy)
         self._pending.append((future, frame_copy))
         self.state = AppState.EXTRACTING
-        print(f"[app] click ({x},{y}) — SAM task submitted (pending={len(self._pending)})")
+        print(f"[app] SPACE — AD task submitted (pending={len(self._pending)})")
+
+    def _run_ad_pipeline(
+        self, frame_bgr: np.ndarray
+    ) -> Tuple[StickerAsset, AnimationResult]:
+        """Background task: send whole BGR frame to AD, return (StickerAsset, AnimationResult).
+
+        StickerAsset.source_region is built from AD's bounding_box.yaml so the
+        existing HomographyAnchor / billboard renderer keep working unchanged.
+        """
+        h, w = frame_bgr.shape[:2]
+        bgra = np.dstack([frame_bgr, np.full((h, w), 255, dtype=np.uint8)])
+
+        work_dir = ANIMATION_WORK_DIR / f"sticker_{int(time.time() * 1000)}"
+        result = run_animated_drawings(
+            texture_bgra=bgra,
+            motion="my_dance_3",
+            ad_repo_path=AD_REPO_PATH,
+            work_dir=work_dir,
+            ad_python=AD_PYTHON,
+            timeout_sec=180.0,
+        )
+        if not result.success or result.video_path is None:
+            raise RuntimeError(result.error or "AD failed without error message")
+
+        out_dir = work_dir / "out"
+        bbox_path = out_dir / "bounding_box.yaml"
+        if not bbox_path.is_file():
+            raise RuntimeError(f"missing bounding_box.yaml at {bbox_path}")
+        bbox_data = yaml.safe_load(bbox_path.read_text())
+        left = int(bbox_data["left"])
+        top = int(bbox_data["top"])
+        right = int(bbox_data["right"])
+        bottom = int(bbox_data["bottom"])
+        source_region = (left, top, right - left, bottom - top)
+
+        texture_path = out_dir / "texture.png"
+        texture_bgra = cv2.imread(str(texture_path), cv2.IMREAD_UNCHANGED)
+        if texture_bgra is None:
+            raise RuntimeError(f"failed to read AD texture at {texture_path}")
+        if texture_bgra.ndim == 2:
+            texture_bgra = cv2.cvtColor(texture_bgra, cv2.COLOR_GRAY2BGRA)
+        elif texture_bgra.shape[2] == 3:
+            texture_bgra = cv2.cvtColor(texture_bgra, cv2.COLOR_BGR2BGRA)
+
+        mask_path = out_dir / "mask.png"
+        mask_u8 = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask_u8 is None:
+            mask_u8 = (texture_bgra[..., 3] > 0).astype(np.uint8) * 255
+
+        sticker_asset = StickerAsset(
+            texture_bgra=texture_bgra,
+            mask_u8=mask_u8,
+            source_region=source_region,
+        )
+        return sticker_asset, result
 
     def _poll_pending(self) -> None:
         still_pending: List[Tuple[Future, np.ndarray]] = []
         for future, ref_frame in self._pending:
             if future.done():
                 try:
-                    sticker = future.result()
+                    sticker_asset, anim_result = future.result()
                     anchor = HomographyAnchor()
-                    anchor.initialize(ref_frame, sticker.source_region)
+                    anchor.initialize(ref_frame, sticker_asset.source_region)
                     if anchor.is_lost():
                         print(
                             f"[app] sticker created but anchor init failed "
                             f"(featureless region); sticker discarded"
                         )
+                        self._cleanup_work_dir(anim_result.work_dir)
                     else:
-                        item = self._promote_to_live(sticker, anchor)
-                        x, y, w, h = sticker.source_region
+                        item = self._promote_to_live(sticker_asset, anchor, anim_result)
+                        x, y, w, h = sticker_asset.source_region
                         print(
                             f"[app] sticker #{len(self._anchored)} created + anchored "
                             f"at ({x},{y}) size {w}x{h}, "
                             f"animation_state={item.animation_state.name}"
                         )
                 except Exception as e:
-                    print(f"[app] segmentation failed: {e}")
+                    print(f"[app] AD pipeline failed: {e}")
             else:
                 still_pending.append((future, ref_frame))
         self._pending = still_pending
@@ -229,17 +294,22 @@ class App:
             self.state = AppState.SCAN
 
     def _promote_to_live(
-        self, sticker_asset: StickerAsset, anchor: HomographyAnchor
+        self,
+        sticker_asset: StickerAsset,
+        anchor: HomographyAnchor,
+        anim_result: AnimationResult,
     ) -> AnchoredSticker:
+        # AD has already finished by the time we get here (one-shot pipeline),
+        # so the sticker enters ANIMATED state directly. PREPARING/spinner is
+        # bypassed.
         item = AnchoredSticker(
             sticker=sticker_asset,
             anchor=anchor,
             popup_lift_ratio=_choose_popup_lift_ratio(sticker_asset.source_region),
+            animation_state=AnimationState.ANIMATED,
+            animation_video_path=anim_result.video_path,
+            animation_work_dir=anim_result.work_dir,
         )
-        if self._animation_worker is not None:
-            item.animation_future = self._animation_worker.submit(sticker_asset.texture_bgra)
-            item.animation_state = AnimationState.PREPARING
-            item.animation_started_at = perf_counter()
         self._anchored.append(item)
         return item
 
@@ -275,39 +345,28 @@ class App:
 
     def run(self) -> None:
         camera = Camera(source=self.camera_source)
-        detector = CandidateDetector(yolo_weights=self._yolo_weights)
-        if self._sam_weights is not None:
-            self._segmenter = Segmenter(self._sam_weights)
-            self._executor = ThreadPoolExecutor(max_workers=1)
-            if not TORCHSERVE_CONFIG_PATH.exists():
-                TORCHSERVE_CONFIG_PATH.write_text(
-                    "default_workers_per_model=1\n"
-                    "enable_metrics_api=false\n"
-                )
-            existing = TORCHSERVE_CONFIG_PATH.read_text() if TORCHSERVE_CONFIG_PATH.exists() else ""
-            if "enable_metrics_api=false" not in existing:
-                print(
-                    f"[app] hint: append 'enable_metrics_api=false' to "
-                    f"{TORCHSERVE_CONFIG_PATH} to silence nvgpu warnings"
-                )
-            self._torchserve = TorchServeRuntime(
-                model_store=AD_REPO_PATH / "torchserve" / "model-store",
-                config_path=TORCHSERVE_CONFIG_PATH,
-                models=TORCHSERVE_MODELS,
-                torchserve_bin=TORCHSERVE_BIN,
+        # New input mode (SPACE → frame → AD) does not use SAM; segmenter stays None.
+        # AnimationWorker is also bypassed; AD is invoked directly inside _run_ad_pipeline.
+        # We keep the executor + TorchServe so SPACE can dispatch background AD jobs.
+        self._executor = ThreadPoolExecutor(max_workers=2)
+        if not TORCHSERVE_CONFIG_PATH.exists():
+            TORCHSERVE_CONFIG_PATH.write_text(
+                "default_workers_per_model=1\n"
+                "enable_metrics_api=false\n"
             )
-            try:
-                self._torchserve.start()
-                self._animation_worker = AnimationWorker(
-                    runner=run_animated_drawings,
-                    ad_repo_path=AD_REPO_PATH,
-                    work_dir_base=ANIMATION_WORK_DIR,
-                    ad_python=AD_PYTHON,
-                )
-            except Exception as e:
-                print(f"[app] WARNING: animation unavailable ({e}); stickers will remain STATIC")
-                self._torchserve = None
-                self._animation_worker = None
+        self._torchserve = TorchServeRuntime(
+            model_store=AD_REPO_PATH / "torchserve" / "model-store",
+            config_path=TORCHSERVE_CONFIG_PATH,
+            models=TORCHSERVE_MODELS,
+            torchserve_bin=TORCHSERVE_BIN,
+        )
+        try:
+            self._torchserve.start()
+            self._animation_worker = "ready"  # marker only; SPACE checks this
+        except Exception as e:
+            print(f"[app] WARNING: AD unavailable ({e}); SPACE will be a no-op")
+            self._torchserve = None
+            self._animation_worker = None
 
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(WINDOW_NAME, self._on_mouse)
@@ -330,10 +389,8 @@ class App:
                 self._poll_animations(perf)
                 perf.record("poll_anim", perf_counter() - t0)
 
-                t0 = perf_counter()
-                boxes = detector.detect(raw)
-                perf.record("detect", perf_counter() - t0)
-                draw_candidate_boxes(display, boxes)
+                # Frame-whole input mode: detection candidates are not used,
+                # so we don't run them or draw boxes on the live view.
 
                 t0 = perf_counter()
                 for item in self._anchored:
@@ -385,6 +442,8 @@ class App:
                     self._reset_stickers()
                 if action is AppAction.SAVE:
                     self._save_stickers()
+                if action is AppAction.CAPTURE:
+                    self._on_space()
         finally:
             print(
                 f"[perf] last {perf.window} frames "
@@ -395,8 +454,8 @@ class App:
                 self._cleanup_work_dir(item.animation_work_dir)
             for r in self._animated_renderers.values():
                 r.release()
-            if self._animation_worker is not None:
-                self._animation_worker.shutdown(wait=False)
+            # _animation_worker is now just a "ready" marker (str) under the
+            # frame-whole input mode, not the AnimationWorker class — no shutdown call.
             if self._torchserve is not None:
                 self._torchserve.stop()
             if self._executor is not None:

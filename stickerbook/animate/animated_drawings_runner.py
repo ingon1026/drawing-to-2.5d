@@ -1,6 +1,7 @@
 """Runs AnimatedDrawings image_to_animation.py and parses the result."""
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -78,18 +79,26 @@ def run_animated_drawings(
     out_dir = work_dir / "out"
 
     cmd = [str(ad_python), str(script), str(input_png), str(out_dir)]
-    motion_cfg = Path(ad_repo_path) / "animated_drawings" / "config" / "motion" / f"{motion}.yaml"
+    motion_cfg = Path(ad_repo_path) / "examples" / "config" / "motion" / f"{motion}.yaml"
     if motion_cfg.is_file():
         cmd.append(str(motion_cfg))
+        # auto-pair retarget config sharing the same name; falls back to AD
+        # default (fair1_ppf) when no custom retarget yaml is supplied.
+        retarget_cfg = Path(ad_repo_path) / "examples" / "config" / "retarget" / f"{motion}.yaml"
+        if retarget_cfg.is_file():
+            cmd.append(str(retarget_cfg))
     else:
         print(f"[ad] motion cfg not found: {motion_cfg}; using AD default")
     start = time.monotonic()
+    # PyOpenGL otherwise probes EGL first under WSLg, breaking AD's GLX context.
+    ad_env = {**os.environ, "PYOPENGL_PLATFORM": "glx"}
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=timeout_sec,
+            env=ad_env,
         )
     except subprocess.TimeoutExpired:
         return AnimationResult(

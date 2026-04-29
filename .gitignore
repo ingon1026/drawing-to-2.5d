@@ -15,6 +15,13 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Experiment outputs (large GIFs)
+stickerbook/experiments/results/
+stickerbook/experiments/results_whole/
+
+# TorchServe / runtime logs
+stickerbook/logs/
+
 # Android build & models in assets
 android/app/src/main/assets/*.tflite
 android/.gradle/
