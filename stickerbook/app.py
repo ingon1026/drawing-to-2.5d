@@ -25,6 +25,7 @@ from config import (
     AD_REPO_PATH,
     ANIMATION_WORK_DIR,
     CAPTURES_DIR,
+    ROOT,
     TORCHSERVE_BIN,
     TORCHSERVE_CONFIG_PATH,
     TORCHSERVE_MODELS,
@@ -32,6 +33,10 @@ from config import (
 from detect.candidate_detector import CandidateDetector
 from export.animated_drawings import save_sticker
 from extract.segmenter import Segmenter, StickerAsset
+from motion.library import MotionLibrary
+from motion.pipeline import MotionPipeline
+from motion.pose_estimator import PoseEstimator
+from motion.recorder import FrameRecorder
 from render.animated_sticker_renderer import AnimatedStickerRenderer
 from render.overlay import draw_candidate_boxes
 from render.spinner_overlay import draw_spinner
@@ -50,6 +55,12 @@ class AppAction(Enum):
     RESET = auto()
     SAVE = auto()
     CAPTURE = auto()  # SPACE: send current frame to AD pipeline
+    RECORD_TOGGLE = auto()  # M 키
+    SELECT_MOTION_1 = auto()
+    SELECT_MOTION_2 = auto()
+    SELECT_MOTION_3 = auto()
+    SELECT_MOTION_4 = auto()
+    SELECT_MOTION_5 = auto()
 
 
 class AnimationState(Enum):
@@ -143,6 +154,10 @@ class App:
         self._animation_worker: Optional[AnimationWorker] = None
         self._animated_renderers: Dict[int, AnimatedStickerRenderer] = {}
         self._spinner_phase: float = 0.0
+        self._motion_library: Optional[MotionLibrary] = None
+        self._motion_pipeline: Optional[MotionPipeline] = None
+        self._motion_pose_estimator: Optional[PoseEstimator] = None
+        self._motion_recorder: Optional[FrameRecorder] = None
 
     def _handle_key(self, key: int) -> Optional[AppAction]:
         if key == -1:
@@ -156,6 +171,18 @@ class App:
             return AppAction.SAVE
         if masked == 32:  # SPACE
             return AppAction.CAPTURE
+        if masked == ord("m") or masked == ord("M"):
+            return AppAction.RECORD_TOGGLE
+        if masked == ord("1"):
+            return AppAction.SELECT_MOTION_1
+        if masked == ord("2"):
+            return AppAction.SELECT_MOTION_2
+        if masked == ord("3"):
+            return AppAction.SELECT_MOTION_3
+        if masked == ord("4"):
+            return AppAction.SELECT_MOTION_4
+        if masked == ord("5"):
+            return AppAction.SELECT_MOTION_5
         return None
 
     def _cleanup_work_dir(self, work_dir: Optional[Path]) -> None:
@@ -218,7 +245,11 @@ class App:
         work_dir = ANIMATION_WORK_DIR / f"sticker_{int(time.time() * 1000)}"
         result = run_animated_drawings(
             texture_bgra=bgra,
-            motion="my_dance_3",
+            motion=(
+                self._motion_library.active()
+                if self._motion_library is not None and self._motion_library.active()
+                else "my_dance_3"
+            ),
             ad_repo_path=AD_REPO_PATH,
             work_dir=work_dir,
             ad_python=AD_PYTHON,
@@ -368,6 +399,26 @@ class App:
             self._torchserve = None
             self._animation_worker = None
 
+        # Motion recording pipeline (mediapipe optional dep)
+        try:
+            self._motion_recorder = FrameRecorder()
+            self._motion_pose_estimator = PoseEstimator()
+            self._motion_library = MotionLibrary(
+                library_dir=ROOT / "assets" / "motions" / "library",
+                ad_repo_path=AD_REPO_PATH,
+            )
+            self._motion_pipeline = MotionPipeline(
+                recorder=self._motion_recorder,
+                estimator=self._motion_pose_estimator,
+                library=self._motion_library,
+                tmp_dir=Path("/tmp/stickerbook_motion"),
+                fps=30.0,
+            )
+            print(f"[app] motion library ready ({len(self._motion_library.list())} motions)")
+        except Exception as e:
+            print(f"[app] WARNING: motion pipeline unavailable ({e}); M/1-5 keys disabled")
+            self._motion_pipeline = None
+
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(WINDOW_NAME, self._on_mouse)
         perf = _PerfTracker()
@@ -379,6 +430,8 @@ class App:
                 raw = camera.read()
                 self._current_frame = raw
                 display = raw.copy()
+                if self._motion_recorder is not None:
+                    self._motion_recorder.add_frame(raw)
                 perf.record("capture", perf_counter() - t0)
 
                 t0 = perf_counter()
@@ -432,6 +485,21 @@ class App:
                             draw_spinner(display, (cx, cy), min(w, h) // 4, self._spinner_phase)
                 perf.record("track_render", perf_counter() - t0)
 
+                # HUD: motion library status
+                if self._motion_recorder is not None and self._motion_recorder.is_recording():
+                    cv2.putText(
+                        display, "REC", (display.shape[1] - 100, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3,
+                    )
+                if self._motion_library is not None:
+                    active = self._motion_library.active()
+                    n = len(self._motion_library.list())
+                    label = f"motion: {active or 'default'}  ({n} in lib)"
+                    cv2.putText(
+                        display, label, (10, display.shape[0] - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1,
+                    )
+
                 cv2.imshow(WINDOW_NAME, display)
                 perf.record("iter", perf_counter() - t_iter)
 
@@ -444,6 +512,28 @@ class App:
                     self._save_stickers()
                 if action is AppAction.CAPTURE:
                     self._on_space()
+                if action is AppAction.RECORD_TOGGLE:
+                    if self._motion_pipeline is not None:
+                        self._motion_pipeline.toggle()
+                if action in (
+                    AppAction.SELECT_MOTION_1, AppAction.SELECT_MOTION_2,
+                    AppAction.SELECT_MOTION_3, AppAction.SELECT_MOTION_4,
+                    AppAction.SELECT_MOTION_5,
+                ):
+                    if self._motion_library is not None:
+                        idx = {
+                            AppAction.SELECT_MOTION_1: 1,
+                            AppAction.SELECT_MOTION_2: 2,
+                            AppAction.SELECT_MOTION_3: 3,
+                            AppAction.SELECT_MOTION_4: 4,
+                            AppAction.SELECT_MOTION_5: 5,
+                        }[action]
+                        name = self._motion_library.get_by_index(idx)
+                        if name is not None:
+                            self._motion_library.set_active(name)
+                            print(f"[app] active motion = {name}")
+                        else:
+                            print(f"[app] no motion at index {idx}")
         finally:
             print(
                 f"[perf] last {perf.window} frames "
@@ -460,5 +550,7 @@ class App:
                 self._torchserve.stop()
             if self._executor is not None:
                 self._executor.shutdown(wait=False)
+            if self._motion_pose_estimator is not None:
+                self._motion_pose_estimator.close()
             camera.release()
             cv2.destroyWindow(WINDOW_NAME)
