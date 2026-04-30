@@ -139,3 +139,54 @@ def test_add_empty_name_falls_back_to_auto(tmp_path: Path, fake_ad_repo: Path):
     src = make_dummy_bvh(tmp_path / "src.bvh")
     name = lib.add(src, name="   ")  # whitespace only
     assert name == "motion_001"  # falls back to auto numbering
+
+
+def test_add_preset_rokoko_writes_thigh_template(tmp_path: Path, fake_ad_repo: Path):
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    lib.add(src, name="r1", preset="rokoko")
+    motion_yaml = (
+        fake_ad_repo / "examples" / "config" / "motion" / "r1.yaml"
+    ).read_text()
+    assert "LeftThigh" in motion_yaml
+    assert "RightThigh" in motion_yaml
+    assert "up: +y" in motion_yaml
+
+
+def test_add_preset_fair1_writes_upleg_template(tmp_path: Path, fake_ad_repo: Path):
+    # Seed fair1_ppf.yaml so retarget clone has a source
+    (fake_ad_repo / "examples" / "config" / "retarget" / "fair1_ppf.yaml").write_text(
+        "char_starting_location: [0,0,-0.5]\n"
+    )
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    lib.add(src, name="f1", preset="fair1")
+    motion_yaml = (
+        fake_ad_repo / "examples" / "config" / "motion" / "f1.yaml"
+    ).read_text()
+    assert "LeftUpLeg" in motion_yaml
+    assert "RightUpLeg" in motion_yaml
+    assert "up: +z" in motion_yaml
+
+
+def test_add_preset_fair1_clones_fair1_ppf_retarget(tmp_path: Path, fake_ad_repo: Path):
+    (fake_ad_repo / "examples" / "config" / "retarget" / "fair1_ppf.yaml").write_text(
+        "fair1: marker\n"
+    )
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    lib.add(src, name="f2", preset="fair1")
+    retarget_yaml = (
+        fake_ad_repo / "examples" / "config" / "retarget" / "f2.yaml"
+    ).read_text()
+    assert "fair1: marker" in retarget_yaml
+
+
+def test_add_unknown_preset_falls_back_to_rokoko(tmp_path: Path, fake_ad_repo: Path):
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    lib.add(src, name="x1", preset="bogus")
+    motion_yaml = (
+        fake_ad_repo / "examples" / "config" / "motion" / "x1.yaml"
+    ).read_text()
+    assert "LeftThigh" in motion_yaml  # rokoko fallback

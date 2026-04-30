@@ -17,7 +17,8 @@ _AUTO_RE = re.compile(r"^motion_(\d{3})\.bvh$")
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
-_MOTION_YAML_TEMPLATE = """\
+_MOTION_YAML_TEMPLATES = {
+    "rokoko": """\
 filepath: examples/bvh/{name}.bvh
 start_frame_idx: 0
 end_frame_idx: {end_idx}
@@ -29,7 +30,26 @@ forward_perp_joint_vectors:
     - RightThigh
 scale: 0.025
 up: +y
-"""
+""",
+    "fair1": """\
+filepath: examples/bvh/{name}.bvh
+start_frame_idx: 0
+end_frame_idx: {end_idx}
+groundplane_joint: LeftFoot
+forward_perp_joint_vectors:
+  - - LeftShoulder
+    - RightShoulder
+  - - LeftUpLeg
+    - RightUpLeg
+scale: 0.025
+up: +z
+""",
+}
+
+_RETARGET_SOURCE_NAMES = {
+    "rokoko": "my_dance.yaml",
+    "fair1": "fair1_ppf.yaml",
+}
 
 
 class MotionLibrary:
@@ -46,7 +66,12 @@ class MotionLibrary:
                 names.append(p.stem)
         return names
 
-    def add(self, bvh_path: Path, name: Optional[str] = None) -> str:
+    def add(
+        self,
+        bvh_path: Path,
+        name: Optional[str] = None,
+        preset: str = "rokoko",
+    ) -> str:
         """Register a BVH into the library + AD examples/.
 
         Args:
@@ -54,8 +79,17 @@ class MotionLibrary:
             name: user-supplied motion name (e.g. "dab"). If None, auto-assign
                   motion_NNN. If supplied name collides with existing entry,
                   suffix "_2", "_3", ... until unique.
+            preset: motion-config template + retarget yaml source.
+                  - "rokoko": Rokoko Vision skeleton (Spine1-4, Thigh/Shin/Toe, +y up).
+                              Default — our bvh_writer output.
+                  - "fair1":  AD's bundled fair1 skeleton (Spine1-3, UpLeg/Leg/ToeBase,
+                              +z up). Use for AD's bundled BVHs (dab, wave_hello, ...).
+                  Unknown preset falls back to "rokoko".
         Returns: assigned name (may differ from `name` if conflict-suffixed).
         """
+        template = _MOTION_YAML_TEMPLATES.get(preset, _MOTION_YAML_TEMPLATES["rokoko"])
+        src_retarget_name = _RETARGET_SOURCE_NAMES.get(preset, "my_dance.yaml")
+
         bvh_path = Path(bvh_path)
         assigned = self._resolve_name(name)
 
@@ -68,26 +102,26 @@ class MotionLibrary:
         ad_bvh.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(bvh_path, ad_bvh)
 
-        # 3. write motion config yaml
+        # 3. write motion config yaml (template per preset)
         end_idx = self._count_bvh_frames(bvh_path) - 1
         ad_motion_yaml = (
             self._ad_repo / "examples" / "config" / "motion" / f"{assigned}.yaml"
         )
         ad_motion_yaml.parent.mkdir(parents=True, exist_ok=True)
         ad_motion_yaml.write_text(
-            _MOTION_YAML_TEMPLATE.format(name=assigned, end_idx=max(end_idx, 0))
+            template.format(name=assigned, end_idx=max(end_idx, 0))
         )
 
-        # 4. retarget yaml = copy of my_dance.yaml (same joint name set)
+        # 4. retarget yaml = copy of preset's source retarget (same joint name set)
         src_retarget = (
-            self._ad_repo / "examples" / "config" / "retarget" / "my_dance.yaml"
+            self._ad_repo / "examples" / "config" / "retarget" / src_retarget_name
         )
         ad_retarget_yaml = (
             self._ad_repo / "examples" / "config" / "retarget" / f"{assigned}.yaml"
         )
         if src_retarget.is_file():
             shutil.copyfile(src_retarget, ad_retarget_yaml)
-        # If my_dance.yaml is missing, AD subprocess falls back to default
+        # If source retarget is missing, AD subprocess falls back to default
         # fair1_ppf — joint mismatch will surface in the smoke test.
 
         return assigned

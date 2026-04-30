@@ -62,6 +62,8 @@ class AppAction(Enum):
     SELECT_MOTION_4 = auto()
     SELECT_MOTION_5 = auto()
     TOGGLE_LIBRARY_VIEW = auto()  # L key
+    NAV_PREV_MOTION = auto()
+    NAV_NEXT_MOTION = auto()
 
 
 class AnimationState(Enum):
@@ -188,6 +190,14 @@ class App:
     def _handle_key(self, key: int) -> Optional[AppAction]:
         if key == -1:
             return None
+        # Arrow keys come back un-0xFF-maskable on Linux/cv2 (raw 65362/65364
+        # under WSLg/X11; ASCII 82/84 collide with R/T after masking). Match the
+        # raw key first so arrows can win over letter keys. Codes vary by build,
+        # so [ / ] are kept as a documented fallback below.
+        if key in (65362, 65363):  # up arrow
+            return AppAction.NAV_PREV_MOTION
+        if key in (65364, 65365):  # down arrow
+            return AppAction.NAV_NEXT_MOTION
         masked = key & 0xFF
         if masked in (ord("q"), ord("Q"), 27):
             return AppAction.QUIT
@@ -211,6 +221,11 @@ class App:
             return AppAction.SELECT_MOTION_5
         if masked == ord("l") or masked == ord("L"):
             return AppAction.TOGGLE_LIBRARY_VIEW
+        # [ / ] fallback nav (in case arrow raw codes differ on this cv2 build)
+        if masked == ord("["):
+            return AppAction.NAV_PREV_MOTION
+        if masked == ord("]"):
+            return AppAction.NAV_NEXT_MOTION
         return None
 
     def _cleanup_work_dir(self, work_dir: Optional[Path]) -> None:
@@ -532,15 +547,18 @@ class App:
                     names = self._motion_library.list()
                     active = self._motion_library.active()
                     cv2.putText(
-                        display, "Library:", (10, 80),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1,
+                        display, "Library (L: hide):", (10, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
                     )
-                    for i, n in enumerate(names[:10]):  # max 10 shown
-                        marker = "*" if n == active else " "
+                    for i, n in enumerate(names[:10]):
+                        is_active = (n == active)
+                        marker = ">" if is_active else " "
                         line = f"{marker} {i+1}. {n}"
+                        color = (0, 255, 255) if is_active else (255, 255, 255)
+                        thickness = 2 if is_active else 1
                         cv2.putText(
-                            display, line, (10, 105 + i * 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1,
+                            display, line, (10, 110 + i * 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, thickness,
                         )
 
                 cv2.imshow(WINDOW_NAME, display)
@@ -568,6 +586,20 @@ class App:
                         self._motion_pipeline.toggle(name=chosen_name)
                 if action is AppAction.TOGGLE_LIBRARY_VIEW:
                     self._show_library = not self._show_library
+                if action in (AppAction.NAV_PREV_MOTION, AppAction.NAV_NEXT_MOTION):
+                    if self._motion_library is not None:
+                        names = self._motion_library.list()
+                        if names:
+                            active = self._motion_library.active()
+                            try:
+                                cur = names.index(active) if active in names else -1
+                            except ValueError:
+                                cur = -1
+                            delta = -1 if action is AppAction.NAV_PREV_MOTION else 1
+                            new_idx = (cur + delta) % len(names)
+                            new_name = names[new_idx]
+                            self._motion_library.set_active(new_name)
+                            print(f"[app] active motion = {new_name}")
                 if action in (
                     AppAction.SELECT_MOTION_1, AppAction.SELECT_MOTION_2,
                     AppAction.SELECT_MOTION_3, AppAction.SELECT_MOTION_4,
