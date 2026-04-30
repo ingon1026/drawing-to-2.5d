@@ -9,11 +9,11 @@ Model: pose_landmarker_lite.task — auto-downloaded on first use to
 ~/.cache/stickerbook/models/. Lite variant chosen for demo speed (~5MB).
 
 WSL2 GL crash workaround: MediaPipe's PoseLandmarker tries to spin up an
-EGL/GL context for image preprocessing even when inference runs on CPU.
-On WSL2 (DRI3 unsupported), that GL init segfaults inside the C++ layer.
-Unsetting DISPLAY/WAYLAND_DISPLAY before create_from_options forces the
-pure CPU path. Done at module import — safe because mediapipe's GL init
-is lazy (happens at create_from_options, not at `import mediapipe`).
+EGL/GL context inside create_from_options even with delegate=CPU, and on
+WSL2 (DRI3 unsupported) that segfaults in the C++ layer. We temporarily
+unset DISPLAY/WAYLAND_DISPLAY only around create_from_options and restore
+them in finally — so anything else in the process (cv2.imshow, etc.) still
+sees a normal display env.
 """
 from __future__ import annotations
 
@@ -24,12 +24,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
-
-# Scrub display env BEFORE the heavy mediapipe imports so the C++ layer
-# never tries to bind an EGL/GL context (segfaults on WSL2). Pose inference
-# runs CPU-only via XNNPACK regardless.
-os.environ.pop("DISPLAY", None)
-os.environ.pop("WAYLAND_DISPLAY", None)
 
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
@@ -68,13 +62,27 @@ class PoseEstimator:
             model_dir = Path.home() / ".cache" / "stickerbook" / "models"
         model_path = _ensure_model(model_dir)
 
-        base_options = mp_python.BaseOptions(model_asset_path=str(model_path))
+        base_options = mp_python.BaseOptions(
+            model_asset_path=str(model_path),
+            delegate=mp_python.BaseOptions.Delegate.CPU,
+        )
         options = mp_vision.PoseLandmarkerOptions(
             base_options=base_options,
             running_mode=mp_vision.RunningMode.IMAGE,
             num_poses=num_poses,
         )
-        self._landmarker = mp_vision.PoseLandmarker.create_from_options(options)
+
+        # WSL2 workaround: MediaPipe's GL/EGL init crashes when DISPLAY is set
+        # under WSLg. Temporarily unset for the create_from_options call only.
+        saved_display = os.environ.pop("DISPLAY", None)
+        saved_wayland = os.environ.pop("WAYLAND_DISPLAY", None)
+        try:
+            self._landmarker = mp_vision.PoseLandmarker.create_from_options(options)
+        finally:
+            if saved_display is not None:
+                os.environ["DISPLAY"] = saved_display
+            if saved_wayland is not None:
+                os.environ["WAYLAND_DISPLAY"] = saved_wayland
 
     def estimate_batch(
         self, frames: List[np.ndarray]
