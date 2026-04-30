@@ -21,14 +21,13 @@ from motion.library import MotionLibrary  # noqa: E402
 
 # (BVH path under AD repo, library name, preset)
 SEED = [
-    ("examples/bvh/my_dance.bvh",          "dance_1",       "rokoko"),
-    ("examples/bvh/my_dance_2.bvh",        "dance_2",       "rokoko"),
-    ("examples/bvh/my_dance_3.bvh",        "dance_3",       "rokoko"),
-    ("examples/bvh/fair1/dab.bvh",         "dab",           "fair1"),
-    ("examples/bvh/fair1/wave_hello.bvh",  "wave_hello",    "fair1"),
-    ("examples/bvh/fair1/jumping_jacks.bvh","jumping_jacks","fair1"),
-    ("examples/bvh/fair1/zombie.bvh",      "zombie",        "fair1"),
-    ("examples/bvh/fair1/jesse_dance.bvh", "jesse_dance",   "fair1"),
+    ("examples/bvh/my_dance.bvh",         "dance_1",    "rokoko"),
+    ("examples/bvh/my_dance_2.bvh",       "dance_2",    "rokoko"),
+    ("examples/bvh/my_dance_3.bvh",       "dance_3",    "rokoko"),
+    ("examples/bvh/fair1/dab.bvh",        "dab",        "fair1"),
+    ("examples/bvh/fair1/jumping.bvh",    "jumping",    "fair1"),
+    ("examples/bvh/fair1/wave_hello.bvh", "wave_hello", "fair1"),
+    ("examples/bvh/fair1/zombie.bvh",     "zombie",     "fair1"),
 ]
 
 
