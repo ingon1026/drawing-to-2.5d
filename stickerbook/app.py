@@ -86,6 +86,71 @@ class AnchoredSticker:
     animation_future: Optional["Future"] = None  # set while PREPARING
     animation_work_dir: Optional[Path] = None  # for I2 cleanup
     popup_lift_ratio: float = 1.0  # set at creation by _promote_to_live
+    # Multi-sticker layout (set by _resolve_slot at creation):
+    lateral_offset_norm: Tuple[float, float] = (0.0, 0.0)  # in bbox units
+    scale_factor: float = 1.0
+    slot_index: int = 0
+
+
+# Slot 0 = center (first sticker, full size, drawn last → on top).
+# Slots 1-8 = sides/diagonals for 2nd+ stickers, smaller for depth feel.
+_SLOT_CANDIDATES: List[Tuple[Tuple[float, float], float]] = [
+    ((0.0, 0.0), 1.0),     # 0: center
+    ((1.0, 0.0), 0.85),    # 1: right
+    ((-1.0, 0.0), 0.85),   # 2: left
+    ((0.0, -1.0), 0.85),   # 3: up
+    ((0.0, 1.0), 0.85),    # 4: down
+    ((1.2, -0.7), 0.75),   # 5: upper-right
+    ((-1.2, -0.7), 0.75),  # 6: upper-left
+    ((1.2, 0.7), 0.75),    # 7: lower-right
+    ((-1.2, 0.7), 0.75),   # 8: lower-left
+]
+
+
+def _sticker_center_with_offset(
+    source_region: Tuple[int, int, int, int],
+    offset_norm: Tuple[float, float],
+) -> Tuple[float, float]:
+    """Frame-coord center of a sticker after applying its bbox-unit offset."""
+    sx, sy, sw, sh = source_region
+    cx = sx + sw / 2.0 + offset_norm[0] * sw
+    cy = sy + sh / 2.0 + offset_norm[1] * sh
+    return cx, cy
+
+
+def _resolve_slot(
+    new_source_region: Tuple[int, int, int, int],
+    existing: List["AnchoredSticker"],
+) -> Tuple[int, Tuple[float, float], float]:
+    """Pick the slot whose proposed center is farthest from any existing sticker.
+
+    Returns (slot_index, offset_norm, scale_factor).
+    First sticker (no existing) always gets slot 0 (center, scale 1.0).
+    Slot 0 is reserved for the first sticker; 2nd+ pick from slots 1-8.
+    """
+    if not existing:
+        return 0, (0.0, 0.0), 1.0
+
+    existing_centers = [
+        _sticker_center_with_offset(s.sticker.source_region, s.lateral_offset_norm)
+        for s in existing
+    ]
+
+    best_score = -1.0
+    best_idx = 1  # slot 0 reserved
+    for i in range(1, len(_SLOT_CANDIDATES)):
+        offset, _ = _SLOT_CANDIDATES[i]
+        cand_cx, cand_cy = _sticker_center_with_offset(new_source_region, offset)
+        min_dist = min(
+            ((cand_cx - ex) ** 2 + (cand_cy - ey) ** 2) ** 0.5
+            for ex, ey in existing_centers
+        )
+        if min_dist > best_score:
+            best_score = min_dist
+            best_idx = i
+
+    offset, scale = _SLOT_CANDIDATES[best_idx]
+    return best_idx, offset, scale
 
 
 def _choose_popup_lift_ratio(source_region: Tuple[int, int, int, int]) -> float:
@@ -376,6 +441,9 @@ class App:
         # AD has already finished by the time we get here (one-shot pipeline),
         # so the sticker enters ANIMATED state directly. PREPARING/spinner is
         # bypassed.
+        slot_idx, offset_norm, scale = _resolve_slot(
+            sticker_asset.source_region, self._anchored
+        )
         item = AnchoredSticker(
             sticker=sticker_asset,
             anchor=anchor,
@@ -383,8 +451,14 @@ class App:
             animation_state=AnimationState.ANIMATED,
             animation_video_path=anim_result.video_path,
             animation_work_dir=anim_result.work_dir,
+            lateral_offset_norm=offset_norm,
+            scale_factor=scale,
+            slot_index=slot_idx,
         )
         self._anchored.append(item)
+        print(
+            f"[app] slot {slot_idx} offset={offset_norm} scale={scale:.2f}"
+        )
         return item
 
     def _poll_animations(self, perf: "_PerfTracker") -> None:
@@ -489,7 +563,9 @@ class App:
                 # so we don't run them or draw boxes on the live view.
 
                 t0 = perf_counter()
-                for item in self._anchored:
+                # Render back-to-front: higher slot_index draws first (behind),
+                # slot 0 (first sticker) draws last (on top) for the depth feel.
+                for item in sorted(self._anchored, key=lambda x: -x.slot_index):
                     state = item.anchor.update(raw)
                     if state.homography is None:
                         continue
@@ -506,6 +582,8 @@ class App:
                                 source_region=item.sticker.source_region,
                                 homography=state.homography,
                                 popup_lift_ratio=item.popup_lift_ratio,
+                                lateral_offset_norm=item.lateral_offset_norm,
+                                scale_factor=item.scale_factor,
                             )
                         else:
                             render_sticker_as_billboard(

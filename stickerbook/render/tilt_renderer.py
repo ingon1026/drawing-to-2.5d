@@ -124,12 +124,19 @@ def render_bgra_as_billboard(
     popup_lift_ratio: float = 1.0,
     shadow_alpha: float = 0.4,
     shadow_blur: int = 4,
+    lateral_offset_norm: Tuple[float, float] = (0.0, 0.0),
+    scale_factor: float = 1.0,
 ) -> None:
     """Render a BGRA texture as a screen-upright billboard whose base follows the paper.
 
     Same geometry as `render_sticker_as_billboard` but accepts a raw BGRA texture
     plus `source_region`, enabling per-frame texture swapping (e.g. animation).
     Shadow silhouette is derived from the alpha channel of `texture_bgra`.
+
+    `lateral_offset_norm` (bbox units, frame-space) and `scale_factor` (around
+    centroid) are applied to the 4 destination corners after the homography
+    projection — used by multi-sticker layout to slot 2nd+ stickers off-center
+    and slightly smaller for a depth feel.
     """
     if not np.isfinite(homography).all() or abs(np.linalg.det(homography)) < 1e-12:
         return
@@ -142,6 +149,15 @@ def render_bgra_as_billboard(
     )
     if not np.isfinite(projected).all():
         return
+
+    # Multi-sticker layout: shift + scale around centroid in frame-space.
+    if lateral_offset_norm != (0.0, 0.0) or scale_factor != 1.0:
+        sx, sy, sw, sh = source_region
+        ox = float(lateral_offset_norm[0]) * float(sw)
+        oy = float(lateral_offset_norm[1]) * float(sh)
+        centroid = projected.mean(axis=0)
+        projected = (projected - centroid) * float(scale_factor) + centroid
+        projected = projected + np.array([ox, oy], dtype=projected.dtype)
 
     th, tw = texture_bgra.shape[:2]
     tex_corners = np.array(

@@ -240,3 +240,57 @@ def test_promote_to_live_keeps_full_popup_for_centered_source_region() -> None:
     item = app._promote_to_live(asset, anchor)
 
     assert item.popup_lift_ratio == 1.0
+
+
+# --- Slot resolver (multi-sticker layout) -------------------------------------
+
+from app import _resolve_slot  # noqa: E402
+from extract.segmenter import StickerAsset  # noqa: E402
+
+
+def _fake_anchored(
+    source_region, offset_norm=(0.0, 0.0), slot_index=0
+) -> AnchoredSticker:
+    """Build a minimal AnchoredSticker for the resolver to inspect."""
+    return AnchoredSticker(
+        sticker=StickerAsset(
+            texture_bgra=np.zeros((10, 10, 4), dtype=np.uint8),
+            mask_u8=np.zeros((10, 10), dtype=np.uint8),
+            source_region=source_region,
+        ),
+        anchor=MagicMock(),
+        lateral_offset_norm=offset_norm,
+        slot_index=slot_index,
+    )
+
+
+def test_first_sticker_gets_slot_0_center() -> None:
+    slot, offset, scale = _resolve_slot((100, 100, 200, 300), [])
+    assert slot == 0
+    assert offset == (0.0, 0.0)
+    assert scale == 1.0
+
+
+def test_second_sticker_picks_a_side_slot() -> None:
+    """With one sticker centered, second should land at a side (slot >= 1)."""
+    first = _fake_anchored((100, 100, 200, 300))
+    slot, offset, scale = _resolve_slot((100, 100, 200, 300), [first])
+    assert slot >= 1
+    assert offset != (0.0, 0.0)
+    assert scale < 1.0
+
+
+def test_resolver_picks_far_slot_to_avoid_existing() -> None:
+    """Existing sticker on the right → second should go left/diagonal-left."""
+    first = _fake_anchored((400, 100, 200, 300))  # existing center ≈ (500, 250)
+    # New sticker default center (200, 250). Slots that push left maximize
+    # distance from the existing right-side sticker.
+    slot, offset, scale = _resolve_slot((100, 100, 200, 300), [first])
+    assert offset[0] <= 0.0
+
+
+def test_resolver_excludes_slot_0_for_non_first() -> None:
+    """Slot 0 is reserved for the first sticker; resolver never returns it."""
+    first = _fake_anchored((100, 100, 200, 300))
+    slot, _, _ = _resolve_slot((100, 100, 200, 300), [first])
+    assert slot != 0
