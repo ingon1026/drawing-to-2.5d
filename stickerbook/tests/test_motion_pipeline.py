@@ -102,3 +102,26 @@ def test_toggle_aborts_on_high_recognition_failure(tmp_path: Path):
     name = pipeline.toggle()
     assert name is None
     lib.add.assert_not_called()
+
+
+def test_toggle_passes_name_to_library(tmp_path: Path):
+    rec = MagicMock()
+    rec.is_recording.return_value = True
+    rec.stop.return_value = [
+        np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(60)
+    ]
+    est = MagicMock()
+    est.estimate_batch.return_value = [_t_pose_landmarks()] * 60
+    lib = MagicMock()
+    lib.add.return_value = "dab"
+
+    pipeline = MotionPipeline(
+        recorder=rec, estimator=est, library=lib,
+        tmp_dir=tmp_path, fps=30.0,
+    )
+    name = pipeline.toggle(name="dab")
+    lib.add.assert_called_once()
+    # assert name="dab" was forwarded
+    _, kwargs = lib.add.call_args
+    assert kwargs.get("name") == "dab"
+    assert name == "dab"

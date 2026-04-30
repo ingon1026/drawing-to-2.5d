@@ -96,3 +96,46 @@ def test_persistence_across_instances(tmp_path: Path, fake_ad_repo: Path):
     lib2 = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
     assert lib2.list() == ["motion_001"]
     assert lib2.add(src) == "motion_002"
+
+
+def test_add_with_custom_name(tmp_path: Path, fake_ad_repo: Path):
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    name = lib.add(src, name="dab")
+    assert name == "dab"
+    assert (tmp_path / "lib" / "dab.bvh").is_file()
+    assert (fake_ad_repo / "examples" / "bvh" / "dab.bvh").is_file()
+    assert (fake_ad_repo / "examples" / "config" / "motion" / "dab.yaml").is_file()
+
+
+def test_add_custom_name_collision_gets_suffix(tmp_path: Path, fake_ad_repo: Path):
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    assert lib.add(src, name="dab") == "dab"
+    assert lib.add(src, name="dab") == "dab_2"
+    assert lib.add(src, name="dab") == "dab_3"
+
+
+def test_add_sanitizes_unsafe_chars(tmp_path: Path, fake_ad_repo: Path):
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    name = lib.add(src, name="my dance/01")
+    # spaces and slashes replaced with _
+    assert "/" not in name
+    assert " " not in name
+
+
+def test_list_includes_custom_names(tmp_path: Path, fake_ad_repo: Path):
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    lib.add(src)               # motion_001
+    lib.add(src, name="dab")
+    names = lib.list()
+    assert set(names) == {"motion_001", "dab"}
+
+
+def test_add_empty_name_falls_back_to_auto(tmp_path: Path, fake_ad_repo: Path):
+    lib = MotionLibrary(library_dir=tmp_path / "lib", ad_repo_path=fake_ad_repo)
+    src = make_dummy_bvh(tmp_path / "src.bvh")
+    name = lib.add(src, name="   ")  # whitespace only
+    assert name == "motion_001"  # falls back to auto numbering

@@ -35,14 +35,18 @@ class MotionPipeline:
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._fps = fps
 
-    def toggle(self) -> Optional[str]:
+    def toggle(self, name: Optional[str] = None) -> Optional[str]:
+        """First call: start recording. Second call: stop + process + save.
+
+        `name` is forwarded to library.add() on stop (None -> auto motion_NNN).
+        """
         if not self._recorder.is_recording():
             self._recorder.start()
             print("[motion] REC start")
             return None
-        return self._stop_and_process()
+        return self._stop_and_process(name=name)
 
-    def _stop_and_process(self) -> Optional[str]:
+    def _stop_and_process(self, name: Optional[str] = None) -> Optional[str]:
         frames = self._recorder.stop()
         print(f"[motion] REC stop ({len(frames)} frames)")
 
@@ -68,11 +72,11 @@ class MotionPipeline:
             return None
 
         try:
-            name = self._library.add(tmp_bvh)
+            assigned = self._library.add(tmp_bvh, name=name)
         except Exception as e:
             print(f"[motion] aborted: library add failed: {e}")
             return None
 
-        self._library.set_active(name)
-        print(f"[motion] saved {name}, active")
-        return name
+        self._library.set_active(assigned)
+        print(f"[motion] saved {assigned}, active")
+        return assigned

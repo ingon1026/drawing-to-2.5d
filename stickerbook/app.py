@@ -61,6 +61,7 @@ class AppAction(Enum):
     SELECT_MOTION_3 = auto()
     SELECT_MOTION_4 = auto()
     SELECT_MOTION_5 = auto()
+    TOGGLE_LIBRARY_VIEW = auto()  # L key
 
 
 class AnimationState(Enum):
@@ -158,6 +159,31 @@ class App:
         self._motion_pipeline: Optional[MotionPipeline] = None
         self._motion_pose_estimator: Optional[PoseEstimator] = None
         self._motion_recorder: Optional[FrameRecorder] = None
+        self._show_library: bool = False
+
+    @staticmethod
+    def _ask_motion_name() -> Optional[str]:
+        """Pop a tkinter dialog asking for a motion name. None on cancel/empty."""
+        try:
+            import tkinter as tk
+            from tkinter import simpledialog
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                name = simpledialog.askstring(
+                    "Motion name",
+                    "이 동작 이름은? (취소 시 자동 motion_NNN):",
+                    parent=root,
+                )
+            finally:
+                root.destroy()
+            if name is None:
+                return None
+            name = name.strip()
+            return name if name else None
+        except Exception as e:
+            print(f"[app] motion name dialog failed: {e}")
+            return None
 
     def _handle_key(self, key: int) -> Optional[AppAction]:
         if key == -1:
@@ -183,6 +209,8 @@ class App:
             return AppAction.SELECT_MOTION_4
         if masked == ord("5"):
             return AppAction.SELECT_MOTION_5
+        if masked == ord("l") or masked == ord("L"):
+            return AppAction.TOGGLE_LIBRARY_VIEW
         return None
 
     def _cleanup_work_dir(self, work_dir: Optional[Path]) -> None:
@@ -500,6 +528,21 @@ class App:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1,
                     )
 
+                if self._show_library and self._motion_library is not None:
+                    names = self._motion_library.list()
+                    active = self._motion_library.active()
+                    cv2.putText(
+                        display, "Library:", (10, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1,
+                    )
+                    for i, n in enumerate(names[:10]):  # max 10 shown
+                        marker = "*" if n == active else " "
+                        line = f"{marker} {i+1}. {n}"
+                        cv2.putText(
+                            display, line, (10, 105 + i * 22),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1,
+                        )
+
                 cv2.imshow(WINDOW_NAME, display)
                 perf.record("iter", perf_counter() - t_iter)
 
@@ -514,7 +557,17 @@ class App:
                     self._on_space()
                 if action is AppAction.RECORD_TOGGLE:
                     if self._motion_pipeline is not None:
-                        self._motion_pipeline.toggle()
+                        is_stopping = (
+                            self._motion_recorder is not None
+                            and self._motion_recorder.is_recording()
+                        )
+                        if is_stopping:
+                            chosen_name = self._ask_motion_name()
+                        else:
+                            chosen_name = None
+                        self._motion_pipeline.toggle(name=chosen_name)
+                if action is AppAction.TOGGLE_LIBRARY_VIEW:
+                    self._show_library = not self._show_library
                 if action in (
                     AppAction.SELECT_MOTION_1, AppAction.SELECT_MOTION_2,
                     AppAction.SELECT_MOTION_3, AppAction.SELECT_MOTION_4,
