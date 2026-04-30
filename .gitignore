@@ -22,6 +22,9 @@ stickerbook/experiments/results_whole/
 # TorchServe / runtime logs
 stickerbook/logs/
 
+# User-recorded motion BVH files (personal data, not source)
+stickerbook/assets/motions/library/*.bvh
+
 # Android build & models in assets
 android/app/src/main/assets/*.tflite
 android/.gradle/
