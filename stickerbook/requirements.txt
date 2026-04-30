@@ -4,3 +4,4 @@ mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git
 torch>=2.1
 numpy>=1.26
 pyyaml>=6.0
+mediapipe>=0.10

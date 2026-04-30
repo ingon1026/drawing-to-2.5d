@@ -25,6 +25,7 @@ from config import (
     AD_REPO_PATH,
     ANIMATION_WORK_DIR,
     CAPTURES_DIR,
+    ROOT,
     TORCHSERVE_BIN,
     TORCHSERVE_CONFIG_PATH,
     TORCHSERVE_MODELS,
@@ -32,6 +33,10 @@ from config import (
 from detect.candidate_detector import CandidateDetector
 from export.animated_drawings import save_sticker
 from extract.segmenter import Segmenter, StickerAsset
+from motion.library import MotionLibrary
+from motion.pipeline import MotionPipeline
+from motion.pose_estimator import PoseEstimator
+from motion.recorder import FrameRecorder
 from render.animated_sticker_renderer import AnimatedStickerRenderer
 from render.overlay import draw_candidate_boxes
 from render.spinner_overlay import draw_spinner
@@ -50,6 +55,15 @@ class AppAction(Enum):
     RESET = auto()
     SAVE = auto()
     CAPTURE = auto()  # SPACE: send current frame to AD pipeline
+    RECORD_TOGGLE = auto()  # M 키
+    SELECT_MOTION_1 = auto()
+    SELECT_MOTION_2 = auto()
+    SELECT_MOTION_3 = auto()
+    SELECT_MOTION_4 = auto()
+    SELECT_MOTION_5 = auto()
+    TOGGLE_LIBRARY_VIEW = auto()  # L key
+    NAV_PREV_MOTION = auto()
+    NAV_NEXT_MOTION = auto()
 
 
 class AnimationState(Enum):
@@ -72,6 +86,71 @@ class AnchoredSticker:
     animation_future: Optional["Future"] = None  # set while PREPARING
     animation_work_dir: Optional[Path] = None  # for I2 cleanup
     popup_lift_ratio: float = 1.0  # set at creation by _promote_to_live
+    # Multi-sticker layout (set by _resolve_slot at creation):
+    lateral_offset_norm: Tuple[float, float] = (0.0, 0.0)  # in bbox units
+    scale_factor: float = 1.0
+    slot_index: int = 0
+
+
+# Slot 0 = center (first sticker, full size, drawn last → on top).
+# Slots 1-8 = sides/diagonals for 2nd+ stickers, smaller for depth feel.
+_SLOT_CANDIDATES: List[Tuple[Tuple[float, float], float]] = [
+    ((0.0, 0.0), 1.0),     # 0: center
+    ((1.0, 0.0), 0.85),    # 1: right
+    ((-1.0, 0.0), 0.85),   # 2: left
+    ((0.0, -1.0), 0.85),   # 3: up
+    ((0.0, 1.0), 0.85),    # 4: down
+    ((1.2, -0.7), 0.75),   # 5: upper-right
+    ((-1.2, -0.7), 0.75),  # 6: upper-left
+    ((1.2, 0.7), 0.75),    # 7: lower-right
+    ((-1.2, 0.7), 0.75),   # 8: lower-left
+]
+
+
+def _sticker_center_with_offset(
+    source_region: Tuple[int, int, int, int],
+    offset_norm: Tuple[float, float],
+) -> Tuple[float, float]:
+    """Frame-coord center of a sticker after applying its bbox-unit offset."""
+    sx, sy, sw, sh = source_region
+    cx = sx + sw / 2.0 + offset_norm[0] * sw
+    cy = sy + sh / 2.0 + offset_norm[1] * sh
+    return cx, cy
+
+
+def _resolve_slot(
+    new_source_region: Tuple[int, int, int, int],
+    existing: List["AnchoredSticker"],
+) -> Tuple[int, Tuple[float, float], float]:
+    """Pick the slot whose proposed center is farthest from any existing sticker.
+
+    Returns (slot_index, offset_norm, scale_factor).
+    First sticker (no existing) always gets slot 0 (center, scale 1.0).
+    Slot 0 is reserved for the first sticker; 2nd+ pick from slots 1-8.
+    """
+    if not existing:
+        return 0, (0.0, 0.0), 1.0
+
+    existing_centers = [
+        _sticker_center_with_offset(s.sticker.source_region, s.lateral_offset_norm)
+        for s in existing
+    ]
+
+    best_score = -1.0
+    best_idx = 1  # slot 0 reserved
+    for i in range(1, len(_SLOT_CANDIDATES)):
+        offset, _ = _SLOT_CANDIDATES[i]
+        cand_cx, cand_cy = _sticker_center_with_offset(new_source_region, offset)
+        min_dist = min(
+            ((cand_cx - ex) ** 2 + (cand_cy - ey) ** 2) ** 0.5
+            for ex, ey in existing_centers
+        )
+        if min_dist > best_score:
+            best_score = min_dist
+            best_idx = i
+
+    offset, scale = _SLOT_CANDIDATES[best_idx]
+    return best_idx, offset, scale
 
 
 def _choose_popup_lift_ratio(source_region: Tuple[int, int, int, int]) -> float:
@@ -143,10 +222,47 @@ class App:
         self._animation_worker: Optional[AnimationWorker] = None
         self._animated_renderers: Dict[int, AnimatedStickerRenderer] = {}
         self._spinner_phase: float = 0.0
+        self._motion_library: Optional[MotionLibrary] = None
+        self._motion_pipeline: Optional[MotionPipeline] = None
+        self._motion_pose_estimator: Optional[PoseEstimator] = None
+        self._motion_recorder: Optional[FrameRecorder] = None
+        self._show_library: bool = False
+
+    @staticmethod
+    def _ask_motion_name() -> Optional[str]:
+        """Pop a tkinter dialog asking for a motion name. None on cancel/empty."""
+        try:
+            import tkinter as tk
+            from tkinter import simpledialog
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                name = simpledialog.askstring(
+                    "Motion name",
+                    "이 동작 이름은? (취소 시 자동 motion_NNN):",
+                    parent=root,
+                )
+            finally:
+                root.destroy()
+            if name is None:
+                return None
+            name = name.strip()
+            return name if name else None
+        except Exception as e:
+            print(f"[app] motion name dialog failed: {e}")
+            return None
 
     def _handle_key(self, key: int) -> Optional[AppAction]:
         if key == -1:
             return None
+        # Arrow keys come back un-0xFF-maskable on Linux/cv2 (raw 65362/65364
+        # under WSLg/X11; ASCII 82/84 collide with R/T after masking). Match the
+        # raw key first so arrows can win over letter keys. Codes vary by build,
+        # so [ / ] are kept as a documented fallback below.
+        if key in (65362, 65363):  # up arrow
+            return AppAction.NAV_PREV_MOTION
+        if key in (65364, 65365):  # down arrow
+            return AppAction.NAV_NEXT_MOTION
         masked = key & 0xFF
         if masked in (ord("q"), ord("Q"), 27):
             return AppAction.QUIT
@@ -156,6 +272,25 @@ class App:
             return AppAction.SAVE
         if masked == 32:  # SPACE
             return AppAction.CAPTURE
+        if masked == ord("m") or masked == ord("M"):
+            return AppAction.RECORD_TOGGLE
+        if masked == ord("1"):
+            return AppAction.SELECT_MOTION_1
+        if masked == ord("2"):
+            return AppAction.SELECT_MOTION_2
+        if masked == ord("3"):
+            return AppAction.SELECT_MOTION_3
+        if masked == ord("4"):
+            return AppAction.SELECT_MOTION_4
+        if masked == ord("5"):
+            return AppAction.SELECT_MOTION_5
+        if masked == ord("l") or masked == ord("L"):
+            return AppAction.TOGGLE_LIBRARY_VIEW
+        # [ / ] fallback nav (in case arrow raw codes differ on this cv2 build)
+        if masked == ord("["):
+            return AppAction.NAV_PREV_MOTION
+        if masked == ord("]"):
+            return AppAction.NAV_NEXT_MOTION
         return None
 
     def _cleanup_work_dir(self, work_dir: Optional[Path]) -> None:
@@ -218,7 +353,11 @@ class App:
         work_dir = ANIMATION_WORK_DIR / f"sticker_{int(time.time() * 1000)}"
         result = run_animated_drawings(
             texture_bgra=bgra,
-            motion="my_dance_3",
+            motion=(
+                self._motion_library.active()
+                if self._motion_library is not None and self._motion_library.active()
+                else "my_dance_3"
+            ),
             ad_repo_path=AD_REPO_PATH,
             work_dir=work_dir,
             ad_python=AD_PYTHON,
@@ -302,6 +441,9 @@ class App:
         # AD has already finished by the time we get here (one-shot pipeline),
         # so the sticker enters ANIMATED state directly. PREPARING/spinner is
         # bypassed.
+        slot_idx, offset_norm, scale = _resolve_slot(
+            sticker_asset.source_region, self._anchored
+        )
         item = AnchoredSticker(
             sticker=sticker_asset,
             anchor=anchor,
@@ -309,8 +451,14 @@ class App:
             animation_state=AnimationState.ANIMATED,
             animation_video_path=anim_result.video_path,
             animation_work_dir=anim_result.work_dir,
+            lateral_offset_norm=offset_norm,
+            scale_factor=scale,
+            slot_index=slot_idx,
         )
         self._anchored.append(item)
+        print(
+            f"[app] slot {slot_idx} offset={offset_norm} scale={scale:.2f}"
+        )
         return item
 
     def _poll_animations(self, perf: "_PerfTracker") -> None:
@@ -368,6 +516,26 @@ class App:
             self._torchserve = None
             self._animation_worker = None
 
+        # Motion recording pipeline (mediapipe optional dep)
+        try:
+            self._motion_recorder = FrameRecorder()
+            self._motion_pose_estimator = PoseEstimator()
+            self._motion_library = MotionLibrary(
+                library_dir=ROOT / "assets" / "motions" / "library",
+                ad_repo_path=AD_REPO_PATH,
+            )
+            self._motion_pipeline = MotionPipeline(
+                recorder=self._motion_recorder,
+                estimator=self._motion_pose_estimator,
+                library=self._motion_library,
+                tmp_dir=Path("/tmp/stickerbook_motion"),
+                fps=30.0,
+            )
+            print(f"[app] motion library ready ({len(self._motion_library.list())} motions)")
+        except Exception as e:
+            print(f"[app] WARNING: motion pipeline unavailable ({e}); M/1-5 keys disabled")
+            self._motion_pipeline = None
+
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(WINDOW_NAME, self._on_mouse)
         perf = _PerfTracker()
@@ -379,6 +547,8 @@ class App:
                 raw = camera.read()
                 self._current_frame = raw
                 display = raw.copy()
+                if self._motion_recorder is not None:
+                    self._motion_recorder.add_frame(raw)
                 perf.record("capture", perf_counter() - t0)
 
                 t0 = perf_counter()
@@ -393,7 +563,9 @@ class App:
                 # so we don't run them or draw boxes on the live view.
 
                 t0 = perf_counter()
-                for item in self._anchored:
+                # Render back-to-front: higher slot_index draws first (behind),
+                # slot 0 (first sticker) draws last (on top) for the depth feel.
+                for item in sorted(self._anchored, key=lambda x: -x.slot_index):
                     state = item.anchor.update(raw)
                     if state.homography is None:
                         continue
@@ -410,6 +582,8 @@ class App:
                                 source_region=item.sticker.source_region,
                                 homography=state.homography,
                                 popup_lift_ratio=item.popup_lift_ratio,
+                                lateral_offset_norm=item.lateral_offset_norm,
+                                scale_factor=item.scale_factor,
                             )
                         else:
                             render_sticker_as_billboard(
@@ -432,6 +606,39 @@ class App:
                             draw_spinner(display, (cx, cy), min(w, h) // 4, self._spinner_phase)
                 perf.record("track_render", perf_counter() - t0)
 
+                # HUD: motion library status
+                if self._motion_recorder is not None and self._motion_recorder.is_recording():
+                    cv2.putText(
+                        display, "REC", (display.shape[1] - 100, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3,
+                    )
+                if self._motion_library is not None:
+                    active = self._motion_library.active()
+                    n = len(self._motion_library.list())
+                    label = f"motion: {active or 'default'}  ({n} in lib)"
+                    cv2.putText(
+                        display, label, (10, display.shape[0] - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1,
+                    )
+
+                if self._show_library and self._motion_library is not None:
+                    names = self._motion_library.list()
+                    active = self._motion_library.active()
+                    cv2.putText(
+                        display, "Library (L: hide):", (10, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
+                    )
+                    for i, n in enumerate(names[:10]):
+                        is_active = (n == active)
+                        marker = ">" if is_active else " "
+                        line = f"{marker} {i+1}. {n}"
+                        color = (0, 255, 255) if is_active else (255, 255, 255)
+                        thickness = 2 if is_active else 1
+                        cv2.putText(
+                            display, line, (10, 110 + i * 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, thickness,
+                        )
+
                 cv2.imshow(WINDOW_NAME, display)
                 perf.record("iter", perf_counter() - t_iter)
 
@@ -444,6 +651,52 @@ class App:
                     self._save_stickers()
                 if action is AppAction.CAPTURE:
                     self._on_space()
+                if action is AppAction.RECORD_TOGGLE:
+                    if self._motion_pipeline is not None:
+                        is_stopping = (
+                            self._motion_recorder is not None
+                            and self._motion_recorder.is_recording()
+                        )
+                        if is_stopping:
+                            chosen_name = self._ask_motion_name()
+                        else:
+                            chosen_name = None
+                        self._motion_pipeline.toggle(name=chosen_name)
+                if action is AppAction.TOGGLE_LIBRARY_VIEW:
+                    self._show_library = not self._show_library
+                if action in (AppAction.NAV_PREV_MOTION, AppAction.NAV_NEXT_MOTION):
+                    if self._motion_library is not None:
+                        names = self._motion_library.list()
+                        if names:
+                            active = self._motion_library.active()
+                            try:
+                                cur = names.index(active) if active in names else -1
+                            except ValueError:
+                                cur = -1
+                            delta = -1 if action is AppAction.NAV_PREV_MOTION else 1
+                            new_idx = (cur + delta) % len(names)
+                            new_name = names[new_idx]
+                            self._motion_library.set_active(new_name)
+                            print(f"[app] active motion = {new_name}")
+                if action in (
+                    AppAction.SELECT_MOTION_1, AppAction.SELECT_MOTION_2,
+                    AppAction.SELECT_MOTION_3, AppAction.SELECT_MOTION_4,
+                    AppAction.SELECT_MOTION_5,
+                ):
+                    if self._motion_library is not None:
+                        idx = {
+                            AppAction.SELECT_MOTION_1: 1,
+                            AppAction.SELECT_MOTION_2: 2,
+                            AppAction.SELECT_MOTION_3: 3,
+                            AppAction.SELECT_MOTION_4: 4,
+                            AppAction.SELECT_MOTION_5: 5,
+                        }[action]
+                        name = self._motion_library.get_by_index(idx)
+                        if name is not None:
+                            self._motion_library.set_active(name)
+                            print(f"[app] active motion = {name}")
+                        else:
+                            print(f"[app] no motion at index {idx}")
         finally:
             print(
                 f"[perf] last {perf.window} frames "
@@ -460,5 +713,7 @@ class App:
                 self._torchserve.stop()
             if self._executor is not None:
                 self._executor.shutdown(wait=False)
+            if self._motion_pose_estimator is not None:
+                self._motion_pose_estimator.close()
             camera.release()
             cv2.destroyWindow(WINDOW_NAME)

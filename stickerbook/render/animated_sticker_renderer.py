@@ -26,7 +26,9 @@ class AnimatedStickerRenderer:
     def next_frame_bgra(self) -> np.ndarray:
         ok, frame_bgr = self._cap.read()
         if not ok or frame_bgr is None:
-            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            # cv2's GIF backend can lose state after seek; full reopen instead
+            self._cap.release()
+            self._cap = cv2.VideoCapture(str(self._video_path))
             ok, frame_bgr = self._cap.read()
             if not ok or frame_bgr is None:
                 raise IOError(f"video has no decodable frames: {self._video_path}")
